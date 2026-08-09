@@ -116,10 +116,6 @@ class Syncer:
     def note_write(self, message: str) -> None:
         self._queue.put(("commit", message))
 
-    def push_now(self) -> None:
-        """Fire-and-forget push, for `:sync` - never blocks the UI thread."""
-        self._queue.put(("flush", None))
-
     def flush(self, timeout: float = 10.0) -> None:
         done = threading.Event()
         self._queue.put(("flush", done))

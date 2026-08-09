@@ -10,9 +10,8 @@ from __future__ import annotations
 import datetime as dt
 import re
 from dataclasses import dataclass
-from typing import Any
 
-from .models import MAX_MINUTES, METRIC_KEY_RE, Skill
+from .models import MAX_MINUTES, Skill
 
 
 @dataclass(frozen=True)
@@ -21,11 +20,6 @@ class QuickAdd:
     minutes: int
     date: dt.date
     note: str = ""
-    extra: tuple[tuple[str, Any], ...] = ()  # tuple keeps QuickAdd hashable/comparable
-
-    @property
-    def metrics(self) -> dict[str, Any]:
-        return dict(self.extra)
 
 
 @dataclass(frozen=True)
@@ -49,52 +43,28 @@ COMMANDS: dict[str, tuple[int, int | None, str]] = {
     "archive": (1, 1, ":archive <id>"),
     "unarchive": (1, 1, ":unarchive <id>"),
     "rm": (1, 1, ":rm <n|id>"),
-    "edit": (2, 2, ":edit <n|id> <duration|key=value>"),
+    "edit": (2, 2, ":edit <n|id> <duration>"),
     "undo": (0, 0, ":undo"),
     "filter": (1, 1, ":filter <id> | :filter off"),
     "year": (1, 1, ":year <YYYY>"),
     "detail": (1, 1, ":detail <id>"),
-    "metric": (2, 2, ":metric <skill> <key> | :metric <skill> -<key>"),
     "sync": (0, 0, ":sync"),
     "export": (1, 2, ":export csv [path]"),
-    "conflicts": (0, 0, ":conflicts"),
-    "fix": (2, 2, ":fix <n> <mine|theirs|newest|oldest|keep|drop>"),
     "q": (0, 0, ":q"),
 }
-
-# The whole resolution vocabulary. mine/theirs/newest/oldest settle a field
-# two machines disagreed on; keep/drop settle a session deleted on one machine
-# and edited on another.
-FIX_ACTIONS = ("mine", "theirs", "newest", "oldest", "keep", "drop")
 
 _DUR_HM = re.compile(r"^(\d+)h(\d+)m?$")
 _DUR_H = re.compile(r"^(\d+(?:\.\d+)?)h$")
 _DUR_M = re.compile(r"^(\d+)m$")
 _DUR_N = re.compile(r"^(\d+)$")
 
-_METRIC_TOKEN = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)=(.*)$")
-
 _DATE_MD = re.compile(r"^(\d{1,2})/(\d{1,2})$")
 _DATE_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_AGO = re.compile(r"^-(\d+)$")
 _WEEKDAYS = {
-    "mon": 0,
-    "monday": 0,
-    "tue": 1,
-    "tues": 1,
-    "tuesday": 1,
-    "wed": 2,
-    "wednesday": 2,
-    "thu": 3,
-    "thur": 3,
-    "thurs": 3,
-    "thursday": 3,
-    "fri": 4,
-    "friday": 4,
-    "sat": 5,
-    "saturday": 5,
-    "sun": 6,
-    "sunday": 6,
+    "mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1,
+    "wed": 2, "wednesday": 2, "thu": 3, "thur": 3, "thurs": 3, "thursday": 3,
+    "fri": 4, "friday": 4, "sat": 5, "saturday": 5, "sun": 6, "sunday": 6,
 }
 
 
@@ -145,10 +115,6 @@ def parse_command(raw: str) -> Command | ParseError:
         return ParseError(f"usage: {usage}")
     if name == "export" and args[0].lower() != "csv":
         return ParseError(f"usage: {usage}")
-    if name == "fix" and (not args[0].isdigit() or args[1].lower() not in FIX_ACTIONS):
-        return ParseError(f"usage: {usage}")
-    if name == "metric" and not METRIC_KEY_RE.match(args[1].lstrip("-").lower()):
-        return ParseError("a metric key is lowercase letters, digits, dashes or underscores")
     return Command(name=name, args=args, rest=rest)
 
 
@@ -162,11 +128,8 @@ def _parse_add(raw: str, skills: list[Skill], today: dt.date) -> Parsed:
     minutes, error = parse_duration(tokens[1])
     if error:
         return ParseError(error)
-    # Metrics come out first, wherever they sit, so "run 45m distance=8.2
-    # yesterday" still finds its date in what remains.
-    declared = next((s.metrics for s in skills if s.id == skill_id), ())
-    extra, rest = _take_metrics(tokens[2:], declared)
     when = today
+    rest = tokens[2:]
     if rest:
         # A date is only consumed from position 3, and only if it really is
         # one - otherwise "ml 1h 5 papers read" would lose its first word.
@@ -177,46 +140,7 @@ def _parse_add(raw: str, skills: list[Skill], today: dt.date) -> Parsed:
             when = candidate
             rest = rest[1:]
     assert skill_id is not None and minutes is not None
-    return QuickAdd(skill=skill_id, minutes=minutes, date=when, note=" ".join(rest), extra=extra)
-
-
-def _take_metrics(
-    tokens: list[str], declared: tuple[str, ...]
-) -> tuple[tuple[tuple[str, Any], ...], list[str]]:
-    """Pull `key=value` tokens the skill has declared out of the note.
-
-    Only declared keys are consumed, so a note that happens to contain an
-    equals sign ("todo: check a=b") stays a note.
-    """
-    found: dict[str, Any] = {}
-    rest: list[str] = []
-    for token in tokens:
-        metric = parse_metric(token, declared)
-        if metric is None:
-            rest.append(token)
-        else:
-            found[metric[0]] = metric[1]
-    return tuple(sorted(found.items())), rest
-
-
-def parse_metric(token: str, declared: tuple[str, ...]) -> tuple[str, Any] | None:
-    """`key=value` for a key this skill declared, else None."""
-    match = _METRIC_TOKEN.match(token)
-    if match is None or not match.group(2) or match.group(1).lower() not in set(declared):
-        return None
-    return match.group(1).lower(), _metric_value(match.group(2))
-
-
-def _metric_value(text: str) -> Any:
-    """Numbers stay numbers so they can be summed; anything else is a label."""
-    try:
-        return int(text)
-    except ValueError:
-        pass
-    try:
-        return float(text)
-    except ValueError:
-        return text
+    return QuickAdd(skill=skill_id, minutes=minutes, date=when, note=" ".join(rest))
 
 
 def parse_duration(token: str) -> tuple[int | None, str | None]:
@@ -304,16 +228,3 @@ def format_duration(minutes: int) -> str:
     if hours:
         return f"{hours}h"
     return f"{mins}m"
-
-
-def format_day(when: dt.date, today: dt.date) -> str:
-    delta = (today - when).days
-    if delta == 0:
-        return "today"
-    if delta == 1:
-        return "yesterday"
-    if delta < 7:
-        return when.strftime("%a")
-    if when.year == today.year:
-        return when.strftime("%-d %b")
-    return when.strftime("%-d %b %Y")

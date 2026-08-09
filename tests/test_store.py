@@ -1,6 +1,5 @@
 """Append safety and replay determinism - the multi-machine guarantees."""
 
-import csv
 import datetime as dt
 import json
 import subprocess
@@ -10,7 +9,6 @@ import textwrap
 from tenx.models import Op
 from tenx.store import (
     append_op,
-    make_add,
     ends_with_newline,
     export_csv,
     load,
@@ -26,9 +24,7 @@ DAY = dt.date(2026, 8, 9)
 
 
 def add_op(op_id, skill="ml", minutes=60, note="", ts="2026-08-09T10:00:00Z", day=DAY):
-    return Op(
-        op="add", id=op_id, ts=ts, fields={"skill": skill, "date": day, "minutes": minutes, "note": note}
-    )
+    return Op(op="add", id=op_id, ts=ts, fields={"skill": skill, "date": day, "minutes": minutes, "note": note})
 
 
 def write_lines(root, device, lines):
@@ -45,7 +41,7 @@ def test_round_trip(tmp_path):
     path = log_path(tmp_path, "mac")
     for i in range(25):
         append_op(path, add_op(f"ID{i:04d}", minutes=30 + i, ts=f"2026-08-09T10:{i:02d}:00Z"))
-    sessions, skipped, _ = replay(read_ops(tmp_path)[0])
+    sessions, skipped = replay(read_ops(tmp_path)[0])
     assert len(sessions) == 25
     assert skipped == 0
     assert sessions["ID0007"].minutes == 37
@@ -55,12 +51,12 @@ def test_add_edit_del_lifecycle(tmp_path):
     path = log_path(tmp_path, "mac")
     append_op(path, add_op("A", minutes=90, ts="2026-08-09T10:00:00Z"))
     append_op(path, Op(op="edit", id="A", ts="2026-08-09T11:00:00Z", fields={"minutes": 105}))
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    sessions, _ = replay(read_ops(tmp_path)[0])
     assert sessions["A"].minutes == 105
     assert sessions["A"].skill == "ml"  # untouched fields survive the merge
 
     append_op(path, Op(op="del", id="A", ts="2026-08-09T12:00:00Z"))
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    sessions, _ = replay(read_ops(tmp_path)[0])
     assert sessions == {}
 
 
@@ -77,7 +73,7 @@ def test_edit_before_add_in_file_order(tmp_path):
             add_op("A", minutes=90, ts="2026-08-09T10:00:00Z").to_line(),
         ],
     )
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    sessions, _ = replay(read_ops(tmp_path)[0])
     assert sessions["A"].minutes == 105
 
 
@@ -88,24 +84,18 @@ def test_edit_older_than_its_add_is_buffered_and_loses(tmp_path):
         tmp_path,
         "mac",
         [
-            Op(
-                op="edit", id="A", ts="2026-08-09T09:00:00Z", fields={"minutes": 105, "note": "old"}
-            ).to_line(),
+            Op(op="edit", id="A", ts="2026-08-09T09:00:00Z", fields={"minutes": 105, "note": "old"}).to_line(),
             add_op("A", minutes=90, ts="2026-08-09T10:00:00Z").to_line(),
         ],
     )
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    sessions, _ = replay(read_ops(tmp_path)[0])
     assert sessions["A"].minutes == 90
     assert sessions["A"].note == ""
 
 
 def test_orphan_edit_without_an_add_is_dropped(tmp_path):
-    write_lines(
-        tmp_path,
-        "mac",
-        [Op(op="edit", id="GHOST", ts="2026-08-09T09:00:00Z", fields={"minutes": 10}).to_line()],
-    )
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    write_lines(tmp_path, "mac", [Op(op="edit", id="GHOST", ts="2026-08-09T09:00:00Z", fields={"minutes": 10}).to_line()])
+    sessions, _ = replay(read_ops(tmp_path)[0])
     assert sessions == {}
 
 
@@ -120,7 +110,7 @@ def test_delete_then_edit_stays_deleted(tmp_path):
             add_op("A", minutes=5, ts="2026-08-09T13:00:00Z").to_line(),
         ],
     )
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    sessions, _ = replay(read_ops(tmp_path)[0])
     assert sessions == {}
 
 
@@ -133,7 +123,7 @@ def test_duplicate_add_newer_ts_wins(tmp_path):
             add_op("A", minutes=120, ts="2026-08-09T11:00:00Z").to_line(),
         ],
     )
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    sessions, _ = replay(read_ops(tmp_path)[0])
     assert len(sessions) == 1
     assert sessions["A"].minutes == 120
 
@@ -157,8 +147,8 @@ def test_read_order_does_not_change_the_result(tmp_path):
         ],
     )
     ops = read_ops(tmp_path)[0]
-    forward, _, _ = replay(ops)
-    backward, _, _ = replay(list(reversed(ops)))
+    forward, _ = replay(ops)
+    backward, _ = replay(list(reversed(ops)))
     assert forward == backward
     assert forward["B"].minutes == 45
 
@@ -176,7 +166,7 @@ def test_unknown_op_is_skipped_and_counted(tmp_path):
         ],
     )
     ops, unreadable = read_ops(tmp_path)
-    sessions, skipped, _ = replay(ops)
+    sessions, skipped = replay(ops)
     assert unreadable == 0  # a future op kind is not corruption
     assert skipped == 1
     assert len(sessions) == 1
@@ -196,7 +186,7 @@ def test_unknown_extra_fields_are_ignored(tmp_path):
         }
     )
     write_lines(tmp_path, "mac", [line])
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    sessions, _ = replay(read_ops(tmp_path)[0])
     assert sessions["A"].minutes == 60
 
 
@@ -209,14 +199,12 @@ def test_malformed_line_mid_file(tmp_path):
             "{not json at all",
             json.dumps({"op": "add", "id": "B"}),  # missing ts and payload
             json.dumps({"op": "add", "id": "C", "skill": "ml", "date": "nope", "minutes": 60, "ts": "t"}),
-            json.dumps(
-                {"op": "add", "id": "D", "skill": "ml", "date": "2026-08-09", "minutes": 0, "ts": "t"}
-            ),
+            json.dumps({"op": "add", "id": "D", "skill": "ml", "date": "2026-08-09", "minutes": 0, "ts": "t"}),
             add_op("E").to_line(),
         ],
     )
     ops, unreadable = read_ops(tmp_path)
-    sessions, _, _ = replay(ops)
+    sessions, _ = replay(ops)
     assert unreadable == 4
     assert set(sessions) == {"A", "E"}
 
@@ -267,7 +255,8 @@ def test_concurrent_appends_from_two_processes(tmp_path):
     path = log_path(tmp_path, "mac")
     path.parent.mkdir(parents=True)
     path.write_text("")
-    script = textwrap.dedent("""
+    script = textwrap.dedent(
+        """
         import datetime as dt, sys
         from pathlib import Path
         from tenx.models import Op
@@ -277,7 +266,8 @@ def test_concurrent_appends_from_two_processes(tmp_path):
             append_op(target, Op(op="add", id=f"{tag}{i:04d}", ts="2026-08-09T10:00:00Z",
                                  fields={"skill": "ml", "date": dt.date(2026, 8, 9),
                                          "minutes": 30, "note": "x" * 120}))
-        """)
+        """
+    )
     procs = [
         subprocess.Popen([sys.executable, "-c", script, tag, str(path)], cwd=str(tmp_path))
         for tag in ("A", "B")
@@ -317,258 +307,6 @@ def test_export_csv(tmp_path):
     path = log_path(tmp_path, "mac")
     append_op(path, add_op("A", minutes=90, note="sweep"))
     out = tmp_path / "out.csv"
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    sessions, _ = replay(read_ops(tmp_path)[0])
     assert export_csv(sessions.values(), out) == 1
     assert "sweep" in out.read_text()
-
-
-# --- collisions -------------------------------------------------------------
-
-
-def edit_op(op_id, device, ts, **changed):
-    return Op(op="edit", id=op_id, ts=ts, fields=dict(changed), device=device)
-
-
-def del_op(op_id, device, ts):
-    return Op(op="del", id=op_id, ts=ts, device=device)
-
-
-def base(device="mac", ts="2026-08-09T10:00:00Z", minutes=60):
-    op = add_op("A", minutes=minutes, ts=ts)
-    return Op(op="add", id="A", ts=ts, fields=op.fields, device=device)
-
-
-SAME = "2026-08-09T11:00:00Z"
-
-
-def test_a_same_second_disagreement_is_a_collision():
-    """The tie-break, not the clock, picked the winner - so say so."""
-    _, _, clashes = replay(
-        [
-            base(),
-            edit_op("A", "mac", SAME, minutes=105),
-            edit_op("A", "laptop", SAME, minutes=120),
-        ]
-    )
-    assert len(clashes) == 1
-    clash = clashes[0]
-    assert clash.kind == "field" and clash.field_name == "minutes"
-    assert (clash.winner.device, clash.winner.value) == ("mac", 105)
-    assert (clash.loser.device, clash.loser.value) == ("laptop", 120)
-
-
-def test_an_ordinary_remote_edit_is_not_a_collision():
-    """Logged on the mac, edited on the laptop an hour later. The laptop had
-    seen the value it was changing - that is the normal flow, not a clash."""
-    _, _, clashes = replay([base(minutes=60), edit_op("A", "laptop", "2026-08-09T11:00:00Z", minutes=150)])
-    assert clashes == []
-
-
-def test_one_machine_changing_its_mind_is_not_a_collision():
-    _, _, clashes = replay(
-        [
-            base(),
-            edit_op("A", "mac", SAME, minutes=105),
-            edit_op("A", "mac", SAME, minutes=120),
-        ]
-    )
-    assert clashes == []
-
-
-def test_two_machines_agreeing_is_not_a_collision():
-    _, _, clashes = replay(
-        [
-            base(),
-            edit_op("A", "mac", SAME, minutes=120),
-            edit_op("A", "laptop", SAME, minutes=120),
-        ]
-    )
-    assert clashes == []
-
-
-def test_editing_what_another_machine_deleted_is_a_collision():
-    sessions, _, clashes = replay(
-        [
-            base(minutes=90),
-            del_op("A", "mac", "2026-08-09T11:00:00Z"),
-            edit_op("A", "laptop", "2026-08-09T12:00:00Z", minutes=150),
-        ]
-    )
-    assert sessions == {}, "the spec keeps it deleted"
-    assert len(clashes) == 1 and clashes[0].kind == "deleted"
-    # Enough of the record survives to offer a restore.
-    assert clashes[0].known["minutes"] == 150 and clashes[0].known["skill"] == "ml"
-
-
-def test_deleting_after_someone_elses_edit_is_the_normal_sequence():
-    _, _, clashes = replay(
-        [
-            base(),
-            edit_op("A", "laptop", "2026-08-09T11:00:00Z", minutes=150),
-            del_op("A", "mac", "2026-08-09T12:00:00Z"),
-        ]
-    )
-    assert clashes == [], "deleting something someone edited earlier is not a disagreement"
-
-
-def test_a_later_write_settles_a_field_collision():
-    """This is all `:fix` does: write the chosen value now. A clearly-timed
-    write means nothing is left for the tie-break to have guessed."""
-    ops = [base(), edit_op("A", "mac", SAME, minutes=105), edit_op("A", "laptop", SAME, minutes=120)]
-    assert len(replay(ops)[2]) == 1
-    settled = ops + [edit_op("A", "mac", "2026-08-09T12:00:00Z", minutes=120)]
-    sessions, _, clashes = replay(settled)
-    assert clashes == []
-    assert sessions["A"].minutes == 120
-
-
-def test_a_later_delete_settles_a_deletion_collision():
-    ops = [
-        base(),
-        del_op("A", "mac", "2026-08-09T11:00:00Z"),
-        edit_op("A", "laptop", "2026-08-09T12:00:00Z", minutes=150),
-    ]
-    assert len(replay(ops)[2]) == 1
-    sessions, _, clashes = replay(ops + [del_op("A", "mac", "2026-08-09T13:00:00Z")])
-    assert clashes == [] and sessions == {}
-
-
-def test_a_fresh_disagreement_after_a_resolution_reopens():
-    ops = [
-        base(),
-        edit_op("A", "mac", SAME, minutes=105),
-        edit_op("A", "laptop", SAME, minutes=120),
-        edit_op("A", "mac", "2026-08-09T12:00:00Z", minutes=105),
-        edit_op("A", "mac", "2026-08-09T13:00:00Z", minutes=200),
-        edit_op("A", "laptop", "2026-08-09T13:00:00Z", minutes=90),
-    ]
-    _, _, clashes = replay(ops)
-    assert len(clashes) == 1 and {clashes[0].winner.value, clashes[0].loser.value} == {200, 90}
-
-
-def test_resolving_needs_no_new_op_kind_or_field(tmp_path):
-    """A resolution is an ordinary edit, so a machine running older code
-    applies it too - nothing about the log format had to change."""
-    path = log_path(tmp_path, "mac")
-    append_op(path, edit_op("A", "", "2026-08-09T12:00:00Z", minutes=105))
-    assert set(json.loads(path.read_text())) == {"op", "id", "minutes", "ts"}
-
-
-def test_collisions_do_not_depend_on_read_order():
-    ops = [
-        base(),
-        edit_op("A", "mac", SAME, minutes=105),
-        edit_op("A", "laptop", SAME, minutes=120),
-        del_op("B", "mac", "2026-08-09T11:00:00Z"),
-        Op(
-            op="add",
-            id="B",
-            ts="2026-08-09T12:00:00Z",
-            device="laptop",
-            fields={"skill": "lc", "date": DAY, "minutes": 30, "note": ""},
-        ),
-    ]
-    forward = replay(ops)[2]
-    backward = replay(list(reversed(ops)))[2]
-    assert forward == backward
-    assert {c.kind for c in forward} == {"field", "deleted"}
-
-
-# --- custom metrics ---------------------------------------------------------
-
-
-def test_metrics_round_trip_through_the_log(tmp_path):
-    path = log_path(tmp_path, "mac")
-    append_op(path, make_add("run", DAY, 45, "easy", extra={"distance": 8.2, "shoes": "vaporfly"}))
-    line = json.loads(path.read_text())
-    assert line["extra"] == {"distance": 8.2, "shoes": "vaporfly"}, "nested, not top level"
-    (session,) = replay(read_ops(tmp_path)[0])[0].values()
-    assert session.extra == {"distance": 8.2, "shoes": "vaporfly"}
-    assert session.minutes == 45 and session.note == "easy"
-
-
-def test_a_metric_can_be_edited_without_touching_the_rest(tmp_path):
-    path = log_path(tmp_path, "mac")
-    append_op(path, make_add("run", DAY, 45, "easy", ts="2026-08-09T10:00:00Z", extra={"distance": 8.2}))
-    session_id = next(iter(replay(read_ops(tmp_path)[0])[0]))
-    append_op(
-        path,
-        Op(op="edit", id=session_id, ts="2026-08-09T11:00:00Z", fields={"extra:distance": 8.6}),
-    )
-    (session,) = replay(read_ops(tmp_path)[0])[0].values()
-    assert session.extra == {"distance": 8.6}
-    assert session.minutes == 45 and session.note == "easy", "untouched fields survive"
-
-
-def test_metrics_collide_like_any_other_field():
-    fields = {"skill": "run", "date": DAY, "minutes": 45, "extra:distance": 8.2}
-    _, _, clashes = replay(
-        [
-            Op("add", "A", "2020-01-01T10:00:00Z", fields, "mac"),
-            Op("edit", "A", SAME, {"extra:distance": 8.6}, "mac"),
-            Op("edit", "A", SAME, {"extra:distance": 9.1}, "laptop"),
-        ]
-    )
-    assert len(clashes) == 1
-    assert clashes[0].field_name == "extra:distance"
-    assert {clashes[0].winner.value, clashes[0].loser.value} == {8.6, 9.1}
-
-
-def test_a_line_with_a_junk_extra_block_still_loads(tmp_path):
-    write_lines(
-        tmp_path,
-        "mac",
-        [
-            json.dumps(
-                {
-                    "op": "add",
-                    "id": "A",
-                    "skill": "run",
-                    "date": "2026-08-09",
-                    "minutes": 45,
-                    "extra": {"distance": 8.2, "BAD KEY": 1, "nested": {"a": 1}, "flag": True},
-                    "ts": "2026-08-09T10:00:00Z",
-                }
-            ),
-            json.dumps(
-                {
-                    "op": "add",
-                    "id": "B",
-                    "skill": "run",
-                    "date": "2026-08-09",
-                    "minutes": 30,
-                    "extra": "not an object",
-                    "ts": "2026-08-09T10:00:00Z",
-                }
-            ),
-        ],
-    )
-    ops, unreadable = read_ops(tmp_path)
-    sessions, _, _ = replay(ops)
-    assert unreadable == 0
-    assert sessions["A"].extra == {"distance": 8.2}, "only usable scalars with valid keys survive"
-    assert sessions["B"].extra == {}
-
-
-def test_export_gives_every_metric_a_column(tmp_path):
-    path = log_path(tmp_path, "mac")
-    append_op(path, make_add("run", DAY, 45, "easy", extra={"distance": 8.2}))
-    append_op(path, make_add("ml", DAY, 60, "sweep"))
-    out = tmp_path / "out.csv"
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
-    export_csv(sessions.values(), out, ["distance", "elevation"])
-    rows = list(csv.reader(out.read_text().splitlines()))
-    assert rows[0] == ["date", "skill", "minutes", "note", "id", "distance", "elevation"]
-    by_skill = {row[1]: row for row in rows[1:]}
-    assert by_skill["run"][5] == "8.2"
-    assert by_skill["ml"][5] == "", "a skill without the metric leaves it blank"
-
-
-def test_export_keeps_columns_for_undeclared_metrics(tmp_path):
-    """Undeclaring a metric must not hide values already recorded."""
-    path = log_path(tmp_path, "mac")
-    append_op(path, make_add("run", DAY, 45, extra={"distance": 8.2}))
-    out = tmp_path / "out.csv"
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
-    export_csv(sessions.values(), out, metrics=())
-    assert "distance" in out.read_text().splitlines()[0]

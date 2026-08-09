@@ -14,7 +14,9 @@ SRC = Path(__file__).resolve().parents[1] / "src" / "tenx"
 
 
 def test_no_engine_module_imports_textual():
-    offenders = [name for name in ENGINE if "textual" in (SRC / f"{name}.py").read_text(encoding="utf-8")]
+    offenders = [
+        name for name in ENGINE if "textual" in (SRC / f"{name}.py").read_text(encoding="utf-8")
+    ]
     assert offenders == [], f"engine modules must not reference textual: {offenders}"
 
 
