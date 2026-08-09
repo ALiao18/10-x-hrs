@@ -50,8 +50,15 @@ COMMANDS: dict[str, tuple[int, int | None, str]] = {
     "detail": (1, 1, ":detail <id>"),
     "sync": (0, 0, ":sync"),
     "export": (1, 2, ":export csv [path]"),
+    "conflicts": (0, 0, ":conflicts"),
+    "fix": (2, 2, ":fix <n> <mine|theirs|newest|oldest|keep|drop>"),
     "q": (0, 0, ":q"),
 }
+
+# The whole resolution vocabulary. mine/theirs/newest/oldest settle a field
+# two machines disagreed on; keep/drop settle a session deleted on one machine
+# and edited on another.
+FIX_ACTIONS = ("mine", "theirs", "newest", "oldest", "keep", "drop")
 
 _DUR_HM = re.compile(r"^(\d+)h(\d+)m?$")
 _DUR_H = re.compile(r"^(\d+(?:\.\d+)?)h$")
@@ -128,6 +135,8 @@ def parse_command(raw: str) -> Command | ParseError:
     if name == "year" and not re.fullmatch(r"\d{4}", args[0]):
         return ParseError(f"usage: {usage}")
     if name == "export" and args[0].lower() != "csv":
+        return ParseError(f"usage: {usage}")
+    if name == "fix" and (not args[0].isdigit() or args[1].lower() not in FIX_ACTIONS):
         return ParseError(f"usage: {usage}")
     return Command(name=name, args=args, rest=rest)
 

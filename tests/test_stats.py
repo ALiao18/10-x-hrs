@@ -271,7 +271,7 @@ def test_a_timezone_move_never_shifts_a_stored_date(tmp_path, monkeypatch):
     for zone in ("UTC", "Asia/Singapore", "America/New_York", "Pacific/Auckland"):
         monkeypatch.setenv("TZ", zone)
         time.tzset()
-        sessions, _ = replay(read_ops(tmp_path)[0])
+        sessions, _, _ = replay(read_ops(tmp_path)[0])
         seen.append({s.id: s.date for s in sessions.values()})
     monkeypatch.delenv("TZ", raising=False)
     time.tzset()

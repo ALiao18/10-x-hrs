@@ -249,3 +249,51 @@ def test_push_is_debounced_not_immediate(tmp_path, remote):
     syncer.flush(timeout=60)  # quit forces it through without waiting 30s
     assert syncer._count_ahead() == 0
     syncer.stop()
+
+
+# --- collisions across machines ---------------------------------------------
+
+
+def test_a_same_second_edit_on_both_machines_surfaces_then_resolves(tmp_path, remote):
+    """The one case the sort key has to guess at, end to end over git."""
+    mac_root, mac = clone(tmp_path, remote, "mac")
+    laptop_root, laptop = clone(tmp_path, remote, "laptop")
+
+    store.append_op(
+        store.log_path(mac_root, "mac"),
+        Op("add", "SESSION1", "2020-01-01T10:00:00Z", {"skill": "ml", "date": DAY, "minutes": 60}),
+    )
+    sync(mac)
+    sync(laptop)
+    assert set(sessions(laptop_root)) == {"SESSION1"}
+
+    # Both machines edit it in the same second, each offline from the other.
+    same = "2020-01-01T11:00:00Z"
+    store.append_op(store.log_path(mac_root, "mac"), Op("edit", "SESSION1", same, {"minutes": 105}))
+    store.append_op(store.log_path(laptop_root, "laptop"), Op("edit", "SESSION1", same, {"minutes": 120}))
+    sync(mac)
+    sync(laptop)
+    sync(mac)
+
+    for root in (mac_root, laptop_root):
+        assert_no_conflict_markers(root)
+        loaded = store.load(root)
+        assert len(loaded.collisions) == 1, root.name
+        clash = loaded.collisions[0]
+        assert clash.kind == "field" and clash.field_name == "minutes"
+        assert {clash.winner.device, clash.loser.device} == {"mac", "laptop"}
+        assert {clash.winner.value, clash.loser.value} == {105, 120}
+    assert (
+        store.load(mac_root).collisions == store.load(laptop_root).collisions
+    ), "both machines agree on the question"
+
+    # The mac settles it; the laptop picks the answer up on its next pull.
+    store.append_op(store.log_path(mac_root, "mac"), store.make_edit("SESSION1", minutes=120))
+    sync(mac)
+    sync(laptop)
+    for root in (mac_root, laptop_root):
+        loaded = store.load(root)
+        assert loaded.collisions == [], f"{root.name} still reports it"
+        assert loaded.sessions["SESSION1"].minutes == 120
+    mac.stop()
+    laptop.stop()

@@ -73,6 +73,39 @@ class Session:
 
 
 @dataclass(frozen=True)
+class Party:
+    """One side of a collision: who wrote what, and when."""
+
+    device: str
+    value: Any
+    ts: str
+
+
+@dataclass(frozen=True)
+class Collision:
+    """The tie-break, rather than the clock, decided which write survived.
+
+    Ordinary last-writer-wins is not a collision: logging on one machine and
+    editing on another an hour later is the normal flow, and the later writer
+    had seen what it was changing. Only two situations qualify:
+
+    * `field` - two devices wrote different values for one field with the
+      *same* ts, so the winner came down to device name.
+    * `deleted` - a tombstone discarded a strictly newer write from another
+      device, because tombstones win by rule rather than by recency.
+    """
+
+    kind: str  # "field" | "deleted"
+    session_id: str
+    skill: str
+    date: dt.date | None = None
+    field_name: str = ""
+    winner: Party | None = None
+    loser: Party | None = None
+    known: dict[str, Any] = field(default_factory=dict)  # last payload seen, for restore
+
+
+@dataclass(frozen=True)
 class Op:
     """One line of a session log.
 

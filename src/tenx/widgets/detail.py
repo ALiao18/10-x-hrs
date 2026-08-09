@@ -20,17 +20,30 @@ class DetailPanel(Static):
         super().__init__(**kwargs)
         self.heading = ""
         self.sessions: list[Session] = []
+        self.lines: list[str] = []
         self.today = dt.date.today()
 
     def update_data(self, heading: str, sessions: list[Session], today: dt.date) -> None:
         self.heading = heading
         self.sessions = sessions
+        self.lines = []
         self.today = today
+        self.refresh()
+
+    def update_lines(self, heading: str, lines: list[str]) -> None:
+        """Plain pre-formatted rows - used by the conflict list."""
+        self.heading = heading
+        self.sessions = []
+        self.lines = lines
         self.refresh()
 
     def render(self) -> Text:
         text = Text()
         text.append(self.heading + "\n", style="bold")
+        if self.lines:
+            for line in self.lines:
+                text.append(line + "\n", style="" if line[:3].strip() else "dim")
+            return text
         if not self.sessions:
             text.append("  no sessions logged yet", style="dim")
             return text

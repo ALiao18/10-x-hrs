@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 import datetime as dt
 from pathlib import Path
+from typing import Any
 
 from textual.app import App, ComposeResult
 from textual.binding import Binding
@@ -12,7 +13,7 @@ from textual.widgets import Input, Static
 
 from . import store
 from .config import Config, data_dir, default_device_id, load_config
-from .models import SKILL_ID_RE, Skill
+from .models import SKILL_ID_RE, Collision, Skill
 from .parse import (
     Command,
     ParseError,
@@ -29,6 +30,18 @@ from .sync import Status, Syncer, status_label
 from .widgets import CommandBar, DetailPanel, Heatmap, SkillTable
 
 DETAIL_LIMIT = 20
+
+
+def _plural(count: int, noun: str) -> str:
+    return f"{count} {noun}" + ("" if count == 1 else "s")
+
+
+def _show(field_name: str, value: Any) -> str:
+    if field_name == "minutes" and isinstance(value, int):
+        return format_duration(value)
+    if isinstance(value, dt.date):
+        return value.isoformat()
+    return f'"{value}"' if value == "" else str(value)
 
 
 def _tail(rest: str) -> str:
@@ -54,6 +67,8 @@ class TenxApp(App):
         self.filter_skill: str | None = None
         self.detail_skill: str | None = None
         self.last_list: list[str] = []  # what <n> indexes into
+        self.conflict_list: list[Collision] = []  # what :fix <n> indexes into
+        self.showing: str | None = None  # which panel the detail area is holding
         self.undo_stack: list[str] = []  # adds made since launch, newest last
         self.status_text = status_label(Status.LOCAL_ONLY, 0)
         self.data = LoadResult(sessions={}, skills=[])
@@ -95,9 +110,21 @@ class TenxApp(App):
                 self._add(result)
             else:
                 self._command(result)
+            self._nag_about_conflicts()
+
+    def _nag_about_conflicts(self) -> None:
+        """Raise unresolved conflicts on the entry itself.
+
+        Appended to the echo rather than blocking: a prompt here would cost a
+        keystroke on every log, and entry speed is the product.
+        """
+        count = len(self.data.collisions)
+        if count and self.showing != "conflicts" and self.bar.last_message.startswith("✓"):
+            self.bar.note(f"⚠ {_plural(count, 'conflict')} - :conflicts")
 
     def action_close_detail(self) -> None:
         self.detail_skill = None
+        self.showing = None
         self.query_one(DetailPanel).display = False
 
     # -- data ----------------------------------------------------------------
@@ -116,8 +143,10 @@ class TenxApp(App):
         daily = self.agg.daily_by_skill.get(self.filter_skill, {}) if self.filter_skill else self.agg.daily
         self.query_one(Heatmap).update_data(daily, self.agg.thresholds, self.year)
         self.query_one("#header", Static).update(self._header())
-        if self.detail_skill:
+        if self.showing == "skill" and self.detail_skill:
             self._render_detail(self.detail_skill)
+        elif self.showing == "conflicts":
+            self._render_conflicts()
 
     def _header(self) -> str:
         total = sum(self.agg.minutes_by_skill.values()) / 60
@@ -131,6 +160,8 @@ class TenxApp(App):
         ]
         if self.data.unreadable:
             parts.append(f"⚠ {self.data.unreadable} unreadable lines")
+        if self.data.collisions:
+            parts.append(f"⚠ {_plural(len(self.data.collisions), 'conflict')} · :conflicts")
         return "  ·  ".join(parts)
 
     def _display_name(self, skill_id: str) -> str:
@@ -242,6 +273,7 @@ class TenxApp(App):
             self.bar.fail(error or "unknown skill")
             return
         self.detail_skill = skill_id
+        self.showing = "skill"
         self.query_one(DetailPanel).display = True
         self._render_detail(skill_id)
         self.bar.ok(f"{self._display_name(skill_id)} - :rm <n> or :edit <n> <duration>, escape to close")
@@ -262,15 +294,108 @@ class TenxApp(App):
             return
         self.bar.ok(f"exported {count} sessions to {target}")
 
+    def _cmd_conflicts(self, command: Command) -> None:
+        self.showing = "conflicts"
+        self.detail_skill = None
+        self.query_one(DetailPanel).display = True
+        self._render_conflicts()
+        if self.conflict_list:
+            self.bar.ok("settle one with :fix <n> <action>")
+        else:
+            self.bar.ok("no conflicts - every machine agrees")
+
+    def _cmd_fix(self, command: Command) -> None:
+        index = int(command.args[0]) - 1
+        action = command.args[1].lower()
+        if not 0 <= index < len(self.conflict_list):
+            self.bar.fail("run :conflicts first, then :fix <n> <action>")
+            return
+        clash = self.conflict_list[index]
+        if clash.kind == "field":
+            self._fix_field(clash, action)
+        else:
+            self._fix_deleted(clash, action)
+
+    def _fix_field(self, clash: Collision, action: str) -> None:
+        if action not in ("mine", "theirs", "newest", "oldest"):
+            self.bar.fail(f'"{action}" settles a deletion, not a value - use mine/theirs/newest/oldest')
+            return
+        value, error = self._pick_side(clash, action)
+        if error:
+            self.bar.fail(error)
+            return
+        self._append(store.make_edit(clash.session_id, **{clash.field_name: value}))
+        self.bar.ok(f"settled {clash.field_name} = {_show(clash.field_name, value)}")
+
+    def _fix_deleted(self, clash: Collision, action: str) -> None:
+        if action == "drop":
+            self._append(store.make_del(clash.session_id))
+            self.bar.ok("kept it deleted")
+            return
+        if action != "keep":
+            self.bar.fail(f'"{action}" settles a value, not a deletion - use keep or drop')
+            return
+        known = clash.known
+        if not all(key in known for key in ("skill", "date", "minutes")):
+            self.bar.fail("too little of that session survived to restore it - use drop")
+            return
+        # Tombstones are absorbing, so restoring means re-adding under a fresh
+        # id. The original stays dead, settled so it stops being reported.
+        restored = store.make_add(known["skill"], known["date"], known["minutes"], known.get("note", ""))
+        self._append(restored, store.make_del(clash.session_id))
+        self.bar.ok(f"restored {self._display_name(known['skill'])} as a new session")
+
+    def _pick_side(self, clash: Collision, action: str) -> tuple[Any, str | None]:
+        assert clash.winner is not None and clash.loser is not None
+        if action == "newest":
+            return clash.winner.value, None
+        if action == "oldest":
+            return clash.loser.value, None
+        me = self.config.device_id
+        mine = next((side for side in (clash.winner, clash.loser) if side.device == me), None)
+        theirs = next((side for side in (clash.winner, clash.loser) if side.device != me), None)
+        if mine is None:
+            others = f"{clash.winner.device} and {clash.loser.device}"
+            return None, f"neither side is this machine ({me}) - {others} disagreed, so use newest or oldest"
+        chosen = mine if action == "mine" else theirs
+        assert chosen is not None
+        return chosen.value, None
+
+    def _render_conflicts(self) -> None:
+        self.conflict_list = list(self.data.collisions)
+        panel = self.query_one(DetailPanel)
+        if not self.conflict_list:
+            panel.update_lines("no conflicts - every machine agrees", [])
+            return
+        lines: list[str] = []
+        for number, clash in enumerate(self.conflict_list, start=1):
+            when = clash.date.isoformat() if clash.date else "unknown date"
+            where = f"{self._display_name(clash.skill) if clash.skill else '?'} · {when}"
+            assert clash.winner is not None and clash.loser is not None
+            if clash.kind == "field":
+                lines.append(f"{number:>3}  {where} · {clash.field_name}")
+                for label, side in (("kept", clash.winner), ("lost", clash.loser)):
+                    value = _show(clash.field_name, side.value)
+                    lines.append(f"     {label}  {side.device:<14}{value:<12}{side.ts}")
+                lines.append(f"     :fix {number} mine | theirs | newest | oldest")
+            else:
+                lines.append(f"{number:>3}  {where} · deleted on {clash.winner.device},")
+                lines.append(f"     then {clash.loser.value}ed on {clash.loser.device} at {clash.loser.ts}")
+                lines.append(f"     :fix {number} keep | drop")
+        panel.update_lines(_plural(len(self.conflict_list), "unresolved conflict"), lines)
+
     def _cmd_q(self, command: Command) -> None:
         self.exit()
 
     # -- shared helpers ------------------------------------------------------
 
-    def _append(self, op) -> None:
-        store.append_op(store.log_path(self.root, self.config.device_id), op)
+    def _append(self, *ops) -> None:
+        path = store.log_path(self.root, self.config.device_id)
+        for op in ops:
+            store.append_op(path, op)
         self.reload()
-        self.syncer.note_write(store.commit_message(op))
+        for op in ops:
+            self.syncer.note_write(store.commit_message(op))
 
     def _save_skills(self, skills: list[Skill]) -> None:
         store.save_skills(self.root, skills)

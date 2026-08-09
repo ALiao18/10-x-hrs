@@ -5,7 +5,9 @@ Two invariants live here and nowhere else:
 * every session log file ends with a trailing newline (``merge=union``
   corrupts lines otherwise), and
 * replay is a pure function of the set of ops, independent of file read
-  order, because every op is ordered by ``(ts, id, device)``.
+  order, because every op is ordered by ``(ts, op kind, id, device)``. Writes that
+  order only by that tie-break, rather than by intent, are reported as
+  collisions instead of being resolved silently.
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .ids import new_ulid
-from .models import PAYLOAD_KEYS, InvalidOp, Op, Session, Skill, utc_now
+from .models import PAYLOAD_KEYS, Collision, InvalidOp, Op, Party, Session, Skill, utc_now
 
 
 class StoreError(Exception):
@@ -32,6 +34,7 @@ class LoadResult:
     skills: list[Skill]
     unreadable: int = 0
     skipped_ops: int = 0
+    collisions: list[Collision] = field(default_factory=list)
 
     @property
     def skill_ids(self) -> set[str]:
@@ -80,7 +83,13 @@ def append_op(path: Path, op: Op) -> None:
         fh.write(payload)
 
 
-def make_add(skill: str, when: dt.date, minutes: int, note: str = "", ts: str | None = None) -> Op:
+def make_add(
+    skill: str,
+    when: dt.date,
+    minutes: int,
+    note: str = "",
+    ts: str | None = None,
+) -> Op:
     """Mint an add op. Parsing stays pure by leaving the ULID and clock here."""
     return Op(
         op="add",
@@ -145,39 +154,103 @@ class _Record:
     fields: dict[str, Any] = field(default_factory=dict)
     keys: dict[str, tuple] = field(default_factory=dict)
 
-    def merge(self, op: Op) -> None:
-        """Last-writer-wins per field, ordered by the op's full sort key."""
+    def merge(self, op: Op) -> list[tuple[str, tuple, Any]]:
+        """Last-writer-wins per field, ordered by the op's full sort key.
+
+        Returns the writes it discarded as (field, losing sort key, losing
+        value), so the caller can decide which of them were real disagreements.
+        """
+        displaced: list[tuple[str, tuple, Any]] = []
         for name in PAYLOAD_KEYS:
             if name not in op.fields:
                 continue
-            if name not in self.keys or op.sort_key > self.keys[name]:
+            if name not in self.keys:
                 self.fields[name] = op.fields[name]
                 self.keys[name] = op.sort_key
+            elif op.sort_key > self.keys[name]:
+                displaced.append((name, self.keys[name], self.fields[name]))
+                self.fields[name] = op.fields[name]
+                self.keys[name] = op.sort_key
+            else:
+                # A buffered edit that lost: the op itself is the discarded one.
+                displaced.append((name, op.sort_key, op.fields[name]))
+        return displaced
 
 
-def replay(ops: Iterable[Op]) -> tuple[dict[str, Session], int]:
-    """Fold ops into live sessions. Returns (sessions, skipped unknown ops)."""
+def replay(ops: Iterable[Op]) -> tuple[dict[str, Session], int, list[Collision]]:
+    """Fold ops into live sessions.
+
+    Returns (sessions, skipped unknown ops, unresolved collisions).
+    """
     ordered = sorted(ops, key=lambda o: o.sort_key)
     records: dict[str, _Record] = {}
     latest_ts: dict[str, str] = {}
-    dead: set[str] = set()
+    dead: dict[str, Op] = {}  # id -> the tombstone that killed it
+    graveyard: dict[str, dict[str, Any]] = {}  # last payload before a delete
+    clashes: dict[tuple[str, str], Collision] = {}
     pending: list[Op] = []
     skipped = 0
 
+    def note_clash(op: Op, displaced: list[tuple[str, tuple, Any]]) -> None:
+        record = records[op.id]
+        for name in op.fields:
+            if record.keys.get(name) == op.sort_key:
+                # A write that won on its timestamp settles the field: someone
+                # decided this after seeing the state, so there is nothing left
+                # for the tie-break to have guessed at.
+                clashes.pop((op.id, name), None)
+        for name, losing_key, losing_value in displaced:
+            winning_key = record.keys[name]
+            winning_value = record.fields[name]
+            if losing_key[0] != winning_key[0]:
+                continue  # the timestamps decided it, which is ordinary LWW
+            if losing_key[3] == winning_key[3] or losing_value == winning_value:
+                continue  # same machine, or no actual disagreement
+            clashes[(op.id, name)] = Collision(
+                kind="field",
+                session_id=op.id,
+                skill=str(record.fields.get("skill", "")),
+                date=record.fields.get("date"),
+                field_name=name,
+                winner=Party(device=winning_key[3], value=winning_value, ts=winning_key[0]),
+                loser=Party(device=losing_key[3], value=losing_value, ts=losing_key[0]),
+            )
+
     for op in ordered:
-        if op.id in dead:
-            continue
         if op.op == "del":
-            dead.add(op.id)
-            records.pop(op.id, None)
-            latest_ts.pop(op.id, None)
-        elif op.op == "add":
+            if op.id not in dead:
+                dead[op.id] = op
+                graveyard[op.id] = dict(records[op.id].fields) if op.id in records else {}
+                records.pop(op.id, None)
+                latest_ts.pop(op.id, None)
+            standing = clashes.get((op.id, ""))
+            if standing is not None and standing.loser is not None and op.ts > standing.loser.ts:
+                clashes.pop((op.id, ""))  # a later delete confirms the deletion
+            continue
+        if op.id in dead:
+            # A write that landed after someone else's tombstone. The tombstone
+            # wins by rule rather than by recency, so the newer intent is
+            # discarded - surface that instead of dropping it silently.
+            tomb = dead[op.id]
+            if op.device != tomb.device and op.op in ("add", "edit") and op.ts > tomb.ts:
+                known = {**graveyard.get(op.id, {}), **op.fields}
+                clashes[(op.id, "")] = Collision(
+                    kind="deleted",
+                    session_id=op.id,
+                    skill=str(known.get("skill", "")),
+                    date=known.get("date"),
+                    winner=Party(device=tomb.device, value="deleted", ts=tomb.ts),
+                    loser=Party(device=op.device, value=op.op, ts=op.ts),
+                    known=known,
+                )
+            continue
+        if op.op == "add":
             record = records.setdefault(op.id, _Record())
-            record.merge(op)
+            note_clash(op, record.merge(op))
             latest_ts[op.id] = max(latest_ts.get(op.id, ""), op.ts)
         elif op.op == "edit":
             if op.id in records:
-                records[op.id].merge(op)
+                note_clash(op, records[op.id].merge(op))
                 latest_ts[op.id] = max(latest_ts.get(op.id, ""), op.ts)
             else:
                 pending.append(op)
@@ -186,8 +259,10 @@ def replay(ops: Iterable[Op]) -> tuple[dict[str, Session], int]:
 
     for op in pending:
         if op.id in records and op.id not in dead:
-            records[op.id].merge(op)
+            note_clash(op, records[op.id].merge(op))
             latest_ts[op.id] = max(latest_ts.get(op.id, ""), op.ts)
+
+    collisions = [clash for _, clash in sorted(clashes.items())]
 
     sessions = {
         op_id: Session(
@@ -200,7 +275,7 @@ def replay(ops: Iterable[Op]) -> tuple[dict[str, Session], int]:
         )
         for op_id, record in records.items()
     }
-    return sessions, skipped
+    return sessions, skipped, collisions
 
 
 # --- skills -----------------------------------------------------------------
@@ -236,8 +311,14 @@ def save_skills(root: Path, skills: list[Skill]) -> None:
 
 def load(root: Path) -> LoadResult:
     ops, unreadable = read_ops(root)
-    sessions, skipped = replay(ops)
-    return LoadResult(sessions=sessions, skills=load_skills(root), unreadable=unreadable, skipped_ops=skipped)
+    sessions, skipped, collisions = replay(ops)
+    return LoadResult(
+        sessions=sessions,
+        skills=load_skills(root),
+        unreadable=unreadable,
+        skipped_ops=skipped,
+        collisions=collisions,
+    )
 
 
 def export_csv(sessions: Iterable[Session], path: Path) -> int:

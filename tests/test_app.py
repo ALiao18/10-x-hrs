@@ -292,3 +292,166 @@ async def test_narrow_terminal_clips_weeks_from_the_left(tmp_path):
         clipped_from = len(full) - len(shown)
         assert shown == full[clipped_from:], "weeks are dropped from the left, not the right"
         assert shown[-1] == full[-1], "the most recent week stays visible"
+
+
+# --- conflicts --------------------------------------------------------------
+
+CONFLICT_ID = "01AAAAAAAAAAAAAAAAAAAAAAAA"
+LOGGED = dt.date(2026, 8, 9)
+# Well in the past, so a resolution written "now" always sorts newer than the
+# conflict it settles - otherwise the fixture, not the code, decides the winner.
+LOGGED_AT = "2020-01-01T10:00:00Z"
+SAME_SECOND = "2020-01-01T11:00:00Z"
+LATER = "2020-01-01T12:00:00Z"
+
+
+def plant_field_conflict(tmp_path, here="test", there="laptop", ours=105, theirs=120):
+    """Two machines writing the same field in the same second: the only case
+    where the sort key, not the clock, decides the winner."""
+    from tenx.models import Op
+
+    fields = {"skill": "ml", "date": LOGGED, "minutes": 60, "note": ""}
+    store.append_op(store.log_path(tmp_path, here), Op("add", CONFLICT_ID, LOGGED_AT, fields))
+    store.append_op(store.log_path(tmp_path, here), Op("edit", CONFLICT_ID, SAME_SECOND, {"minutes": ours}))
+    store.append_op(
+        store.log_path(tmp_path, there), Op("edit", CONFLICT_ID, SAME_SECOND, {"minutes": theirs})
+    )
+
+
+def plant_deleted_conflict(tmp_path):
+    """Deleted on one machine, edited afterwards on another. The tombstone wins
+    by rule rather than by recency, so a newer intent gets dropped."""
+    from tenx.models import Op
+
+    fields = {"skill": "ml", "date": LOGGED, "minutes": 90, "note": "sweep"}
+    store.append_op(store.log_path(tmp_path, "test"), Op("add", CONFLICT_ID, LOGGED_AT, fields))
+    store.append_op(store.log_path(tmp_path, "test"), Op("del", CONFLICT_ID, SAME_SECOND))
+    store.append_op(store.log_path(tmp_path, "laptop"), Op("edit", CONFLICT_ID, LATER, {"minutes": 150}))
+
+
+def minutes_now(tmp_path):
+    return store.load(tmp_path).sessions[CONFLICT_ID].minutes
+
+
+@pilot_test
+async def test_a_conflict_is_raised_on_the_entry_itself(tmp_path):
+    app = make_app(tmp_path)
+    plant_field_conflict(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, "ml 1h")
+        echo = app.query_one(CommandBar).last_message
+        assert echo.startswith("✓"), "a conflict must never block a log"
+        assert "1 conflict" in echo and ":conflicts" in echo
+        assert "1 conflict" in app._header(), "and it stays visible in the status line"
+        assert len(store.load(tmp_path).sessions) == 2, "the entry still landed"
+
+
+@pilot_test
+async def test_conflicts_lists_both_sides(tmp_path):
+    app = make_app(tmp_path)
+    plant_field_conflict(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":conflicts")
+        panel = app.query_one(DetailPanel)
+        assert panel.display and len(app.conflict_list) == 1
+        body = panel.render().plain
+        assert "test" in body and "laptop" in body
+        assert "1h45" in body and "2h" in body  # 105 and 120 minutes
+        assert ":fix 1 mine | theirs | newest | oldest" in body
+
+
+@pilot_test
+async def test_fix_theirs(tmp_path):
+    app = make_app(tmp_path)
+    plant_field_conflict(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":conflicts")
+        await submit(pilot, ":fix 1 theirs")
+        assert minutes_now(tmp_path) == 120
+        assert store.load(tmp_path).collisions == [], "resolving must settle it for good"
+        assert app.conflict_list == []
+
+
+@pilot_test
+async def test_fix_mine(tmp_path):
+    app = make_app(tmp_path)
+    plant_field_conflict(tmp_path, ours=45, theirs=60)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":conflicts")
+        await submit(pilot, ":fix 1 mine")
+        assert minutes_now(tmp_path) == 45
+        assert store.load(tmp_path).collisions == []
+
+
+@pilot_test
+async def test_fix_newest_and_oldest(tmp_path):
+    app = make_app(tmp_path)
+    plant_field_conflict(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":conflicts")
+        loser = app.conflict_list[0].loser.value
+        await submit(pilot, ":fix 1 oldest")
+        assert minutes_now(tmp_path) == loser
+        assert store.load(tmp_path).collisions == []
+
+
+@pilot_test
+async def test_fix_falls_back_when_neither_side_is_this_machine(tmp_path):
+    app = make_app(tmp_path)
+    plant_field_conflict(tmp_path, here="laptop", there="phone")
+    async with app.run_test() as pilot:
+        await submit(pilot, ":conflicts")
+        await submit(pilot, ":fix 1 mine")
+        message = app.query_one(CommandBar).last_message
+        assert message.startswith("✗") and "newest or oldest" in message
+        await submit(pilot, ":fix 1 newest")
+        assert store.load(tmp_path).collisions == []
+
+
+@pilot_test
+async def test_keep_restores_a_session_deleted_elsewhere(tmp_path):
+    app = make_app(tmp_path)
+    plant_deleted_conflict(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":conflicts")
+        assert app.conflict_list[0].kind == "deleted"
+        await submit(pilot, ":fix 1 keep")
+
+        loaded = store.load(tmp_path)
+        assert loaded.collisions == []
+        assert CONFLICT_ID not in loaded.sessions, "tombstones are absorbing"
+        restored = list(loaded.sessions.values())
+        assert len(restored) == 1
+        assert (restored[0].minutes, restored[0].note) == (150, "sweep")
+
+
+@pilot_test
+async def test_drop_confirms_the_deletion(tmp_path):
+    app = make_app(tmp_path)
+    plant_deleted_conflict(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":conflicts")
+        await submit(pilot, ":fix 1 drop")
+        loaded = store.load(tmp_path)
+        assert loaded.collisions == [] and loaded.sessions == {}
+
+
+@pilot_test
+async def test_the_wrong_verb_for_the_kind_explains_itself(tmp_path):
+    app = make_app(tmp_path)
+    plant_field_conflict(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":conflicts")
+        await submit(pilot, ":fix 1 keep")
+        message = app.query_one(CommandBar).last_message
+        assert message.startswith("✗") and "mine/theirs/newest/oldest" in message
+        assert store.load(tmp_path).collisions != [], "a bad verb must not settle anything"
+
+
+@pilot_test
+async def test_fix_without_listing_first(tmp_path):
+    app = make_app(tmp_path)
+    plant_field_conflict(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":fix 1 mine")
+        assert "run :conflicts first" in app.query_one(CommandBar).last_message

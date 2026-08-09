@@ -39,5 +39,11 @@ class CommandBar(Vertical):
         self.echo.add_class("error")
         self.echo.update(f"✗ {message}")
 
+    def note(self, message: str) -> None:
+        """Append a warning to whatever the echo already says, without
+        disturbing the entry - used to raise conflicts on the log itself."""
+        self.last_message = f"{self.last_message}  ·  {message}" if self.last_message else message
+        self.echo.update(self.last_message)
+
     def _clear_echo(self) -> None:
         self.echo.update("")

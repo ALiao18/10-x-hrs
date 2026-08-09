@@ -87,6 +87,8 @@ A leading `:` means a command (a colon inside a note is just a colon).
 | `:year <YYYY>` | scroll the heatmap |
 | `:detail <id>` (or `d <id>`) | per-skill view with numbered sessions |
 | `:sync` | force pull + push now |
+| `:conflicts` | list collisions the sort key had to guess at |
+| `:fix <n> <action>` | settle one (see below) |
 | `:export csv [path]` | flat dump of live records |
 | `:q` | quit, flushing the push |
 
@@ -114,6 +116,53 @@ union-merge cleanly on the next pull — no conflict, no prompt. Loading sorts
 every op by `(ts, op kind, id, device)` and folds them, last-writer-wins per
 field, which makes the result identical no matter what order the files are
 read in. Unreadable lines are skipped and counted, never dropped silently.
+
+## When two machines disagree
+
+Last-writer-wins settles almost everything by timestamp, and that is not a
+conflict — logging on the mac and editing on the laptop an hour later is just
+the normal flow. A conflict is the narrower case where **the tie-break, not
+the clock, picked the winner**. There are exactly two:
+
+| what happened | what the fold did |
+| --- | --- |
+| two machines wrote the same field **in the same second** | picked by device name — arbitrary |
+| a session deleted on one machine was **edited afterwards** on another | tombstone wins by rule, so a newer intent was dropped |
+
+Anything else — different timestamps, the same machine changing its mind, two
+machines that happened to write the same value — is not reported.
+
+They are raised where you will actually see them: in the status line, and
+appended to the echo of whatever you just typed. They never block a log.
+
+```
+> ml 45m
+✓ machine learning +45m · today · 2.5h total  ·  ⚠ 2 conflicts - :conflicts
+
+> :conflicts
+2 unresolved conflicts
+  1  machine learning · 2026-08-09 · minutes
+     kept  mac-studio    1h45        2020-01-01T11:00:00Z
+     lost  laptop        2h          2020-01-01T11:00:00Z
+     :fix 1 mine | theirs | newest | oldest
+  2  poker · 2026-08-09 · deleted on mac-studio,
+     then edited on laptop at 2020-01-01T12:00:00Z
+     :fix 2 keep | drop
+```
+
+Six fixed actions, four for a value and two for a deletion:
+
+| action | effect |
+| --- | --- |
+| `mine` / `theirs` | keep this machine's value, or the other one's |
+| `newest` / `oldest` | keep the later or earlier write — always available, even when neither side is this machine |
+| `keep` | bring back a session deleted elsewhere (as a new record; tombstones are absorbing) |
+| `drop` | confirm the deletion |
+
+A fix is just an ordinary `edit` or `del` written now. Because it carries a
+clearly later timestamp, nothing is left for the tie-break to guess at and the
+conflict is settled everywhere on the next sync — including on machines
+running older versions of `tenx`, since the log format did not change.
 
 Totals, levels, streaks and heatmap buckets are always derived, never stored.
 The git history is the backup: `git log -p sessions/` reconstructs any prior
