@@ -62,9 +62,23 @@ _DATE_MD = re.compile(r"^(\d{1,2})/(\d{1,2})$")
 _DATE_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_AGO = re.compile(r"^-(\d+)$")
 _WEEKDAYS = {
-    "mon": 0, "monday": 0, "tue": 1, "tues": 1, "tuesday": 1,
-    "wed": 2, "wednesday": 2, "thu": 3, "thur": 3, "thurs": 3, "thursday": 3,
-    "fri": 4, "friday": 4, "sat": 5, "saturday": 5, "sun": 6, "sunday": 6,
+    "mon": 0,
+    "monday": 0,
+    "tue": 1,
+    "tues": 1,
+    "tuesday": 1,
+    "wed": 2,
+    "wednesday": 2,
+    "thu": 3,
+    "thur": 3,
+    "thurs": 3,
+    "thursday": 3,
+    "fri": 4,
+    "friday": 4,
+    "sat": 5,
+    "saturday": 5,
+    "sun": 6,
+    "sunday": 6,
 }
 
 

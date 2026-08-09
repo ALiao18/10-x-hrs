@@ -163,9 +163,12 @@ def year_grid(year: int) -> list[list[dt.date | None]]:
     return grid
 
 
-def month_labels(year: int) -> list[tuple[int, str]]:
-    """(column index, short month name) for the header row."""
-    grid = year_grid(year)
+def month_labels(grid: list[list[dt.date | None]]) -> list[tuple[int, str]]:
+    """(column index, short month name) for the header row.
+
+    Takes a grid rather than a year so the heatmap can label a clipped view
+    without the indices drifting out from under it.
+    """
     labels: list[tuple[int, str]] = []
     seen: set[int] = set()
     for index, column in enumerate(grid):
@@ -177,9 +180,7 @@ def month_labels(year: int) -> list[tuple[int, str]]:
     return labels
 
 
-def sparkline_values(
-    daily: dict[dt.date, int], today: dt.date, days: int = SPARKLINE_DAYS
-) -> list[int]:
+def sparkline_values(daily: dict[dt.date, int], today: dt.date, days: int = SPARKLINE_DAYS) -> list[int]:
     """Minutes per day for the trailing window, oldest first."""
     start = today - dt.timedelta(days=days - 1)
     return [daily.get(start + dt.timedelta(days=offset), 0) for offset in range(days)]

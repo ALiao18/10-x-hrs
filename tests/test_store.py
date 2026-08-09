@@ -24,7 +24,9 @@ DAY = dt.date(2026, 8, 9)
 
 
 def add_op(op_id, skill="ml", minutes=60, note="", ts="2026-08-09T10:00:00Z", day=DAY):
-    return Op(op="add", id=op_id, ts=ts, fields={"skill": skill, "date": day, "minutes": minutes, "note": note})
+    return Op(
+        op="add", id=op_id, ts=ts, fields={"skill": skill, "date": day, "minutes": minutes, "note": note}
+    )
 
 
 def write_lines(root, device, lines):
@@ -84,7 +86,9 @@ def test_edit_older_than_its_add_is_buffered_and_loses(tmp_path):
         tmp_path,
         "mac",
         [
-            Op(op="edit", id="A", ts="2026-08-09T09:00:00Z", fields={"minutes": 105, "note": "old"}).to_line(),
+            Op(
+                op="edit", id="A", ts="2026-08-09T09:00:00Z", fields={"minutes": 105, "note": "old"}
+            ).to_line(),
             add_op("A", minutes=90, ts="2026-08-09T10:00:00Z").to_line(),
         ],
     )
@@ -94,7 +98,11 @@ def test_edit_older_than_its_add_is_buffered_and_loses(tmp_path):
 
 
 def test_orphan_edit_without_an_add_is_dropped(tmp_path):
-    write_lines(tmp_path, "mac", [Op(op="edit", id="GHOST", ts="2026-08-09T09:00:00Z", fields={"minutes": 10}).to_line()])
+    write_lines(
+        tmp_path,
+        "mac",
+        [Op(op="edit", id="GHOST", ts="2026-08-09T09:00:00Z", fields={"minutes": 10}).to_line()],
+    )
     sessions, _ = replay(read_ops(tmp_path)[0])
     assert sessions == {}
 
@@ -199,7 +207,9 @@ def test_malformed_line_mid_file(tmp_path):
             "{not json at all",
             json.dumps({"op": "add", "id": "B"}),  # missing ts and payload
             json.dumps({"op": "add", "id": "C", "skill": "ml", "date": "nope", "minutes": 60, "ts": "t"}),
-            json.dumps({"op": "add", "id": "D", "skill": "ml", "date": "2026-08-09", "minutes": 0, "ts": "t"}),
+            json.dumps(
+                {"op": "add", "id": "D", "skill": "ml", "date": "2026-08-09", "minutes": 0, "ts": "t"}
+            ),
             add_op("E").to_line(),
         ],
     )
@@ -255,8 +265,7 @@ def test_concurrent_appends_from_two_processes(tmp_path):
     path = log_path(tmp_path, "mac")
     path.parent.mkdir(parents=True)
     path.write_text("")
-    script = textwrap.dedent(
-        """
+    script = textwrap.dedent("""
         import datetime as dt, sys
         from pathlib import Path
         from tenx.models import Op
@@ -266,8 +275,7 @@ def test_concurrent_appends_from_two_processes(tmp_path):
             append_op(target, Op(op="add", id=f"{tag}{i:04d}", ts="2026-08-09T10:00:00Z",
                                  fields={"skill": "ml", "date": dt.date(2026, 8, 9),
                                          "minutes": 30, "note": "x" * 120}))
-        """
-    )
+        """)
     procs = [
         subprocess.Popen([sys.executable, "-c", script, tag, str(path)], cwd=str(tmp_path))
         for tag in ("A", "B")

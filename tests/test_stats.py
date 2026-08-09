@@ -167,10 +167,20 @@ def test_weekday_rows_are_consistent():
 
 def test_year_boundary_lands_in_the_right_column():
     grid = year_grid(2026)
-    last = [(col, row) for col, column in enumerate(grid) for row, day in enumerate(column) if day == dt.date(2026, 12, 31)]
+    last = [
+        (col, row)
+        for col, column in enumerate(grid)
+        for row, day in enumerate(column)
+        if day == dt.date(2026, 12, 31)
+    ]
     assert last and last[0][0] >= 52
     grid_next = year_grid(2027)
-    first = [(col, row) for col, column in enumerate(grid_next) for row, day in enumerate(column) if day == dt.date(2027, 1, 1)]
+    first = [
+        (col, row)
+        for col, column in enumerate(grid_next)
+        for row, day in enumerate(column)
+        if day == dt.date(2027, 1, 1)
+    ]
     assert first and first[0][0] == 0
 
 
@@ -180,10 +190,18 @@ def test_leap_day_is_present():
 
 
 def test_month_labels():
-    labels = month_labels(2026)
+    labels = month_labels(year_grid(2026))
     assert len(labels) == 12
     assert labels[0][1] == "Jan" and labels[-1][1] == "Dec"
     assert [col for col, _ in labels] == sorted(col for col, _ in labels)
+
+
+def test_month_labels_reindex_for_a_clipped_grid():
+    """The heatmap clips weeks off the left; labels must follow, not drift."""
+    clipped = year_grid(2026)[-10:]
+    labels = month_labels(clipped)
+    assert labels[0][0] == 0
+    assert all(0 <= col < len(clipped) for col, _ in labels)
 
 
 def test_sparkline_values():
@@ -238,11 +256,15 @@ def test_a_timezone_move_never_shifts_a_stored_date(tmp_path, monkeypatch):
     # Same local date, wildly different UTC wall-clock times.
     append_op(
         log_path(tmp_path, "singapore"),
-        Op(op="add", id="SG", ts="2026-08-09T01:00:00Z", fields={"skill": "ml", "date": TODAY, "minutes": 60}),
+        Op(
+            op="add", id="SG", ts="2026-08-09T01:00:00Z", fields={"skill": "ml", "date": TODAY, "minutes": 60}
+        ),
     )
     append_op(
         log_path(tmp_path, "newyork"),
-        Op(op="add", id="NY", ts="2026-08-10T03:00:00Z", fields={"skill": "ml", "date": TODAY, "minutes": 30}),
+        Op(
+            op="add", id="NY", ts="2026-08-10T03:00:00Z", fields={"skill": "ml", "date": TODAY, "minutes": 30}
+        ),
     )
 
     seen = []

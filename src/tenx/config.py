@@ -132,7 +132,8 @@ def init(root: Path | None = None, remote: str | None = None, device_id: str | N
                 cloned = True
                 messages.append(f"cloned {remote}")
             else:
-                messages.append(f"could not clone {remote} - starting a fresh repo ({err.splitlines()[-1] if err else 'unknown error'})")
+                reason = err.splitlines()[-1] if err else "unknown error"
+                messages.append(f"could not clone {remote} - starting a fresh repo ({reason})")
         if not (root / ".git").is_dir():
             root.mkdir(parents=True, exist_ok=True)
             code, _, err = git(root, "init", "-b", "main")
@@ -173,7 +174,9 @@ def init(root: Path | None = None, remote: str | None = None, device_id: str | N
     save_config(root, existing or Config(device_id=resolved))
 
     if not gitattributes_ok(root):
-        raise InitError(f"{root}/.gitattributes is missing the union-merge rule; concurrent logs would conflict")
+        raise InitError(
+            f"{root}/.gitattributes is missing the union-merge rule; concurrent logs would conflict"
+        )
 
     git(root, "add", "-A")
     git(root, "commit", "-m", f"tenx: init {resolved}")
