@@ -13,7 +13,7 @@ from textual.widgets import Input, Static
 
 from . import store
 from .config import Config, data_dir, default_device_id, load_config
-from .models import SKILL_ID_RE, Collision, Skill
+from .models import EXTRA_PREFIX, SKILL_ID_RE, Collision, Skill
 from .parse import (
     Command,
     ParseError,
@@ -22,9 +22,18 @@ from .parse import (
     format_duration,
     parse,
     parse_duration,
+    parse_metric,
     resolve_skill,
 )
-from .stats import Aggregate, aggregate, current_streak, level_label, longest_streak, recent_sessions
+from .stats import (
+    Aggregate,
+    aggregate,
+    current_streak,
+    level_label,
+    longest_streak,
+    metric_totals,
+    recent_sessions,
+)
 from .store import LoadResult, StoreError
 from .sync import Status, Syncer, status_label
 from .widgets import CommandBar, DetailPanel, Heatmap, SkillTable
@@ -37,6 +46,7 @@ def _plural(count: int, noun: str) -> str:
 
 
 def _show(field_name: str, value: Any) -> str:
+    field_name = field_name.removeprefix(EXTRA_PREFIX)
     if field_name == "minutes" and isinstance(value, int):
         return format_duration(value)
     if isinstance(value, dt.date):
@@ -170,7 +180,7 @@ class TenxApp(App):
     # -- quick add -----------------------------------------------------------
 
     def _add(self, intent: QuickAdd) -> None:
-        op = store.make_add(intent.skill, intent.date, intent.minutes, intent.note)
+        op = store.make_add(intent.skill, intent.date, intent.minutes, intent.note, extra=intent.metrics)
         store.append_op(store.log_path(self.root, self.config.device_id), op)
         self.undo_stack.append(op.id)
         self.last_list = [op.id]
@@ -227,6 +237,13 @@ class TenxApp(App):
         session = self._find_session(command.args[0])
         if session is None:
             return
+        declared = next((s.metrics for s in self.data.skills if s.id == session.skill), ())
+        metric = parse_metric(command.args[1], declared)
+        if metric is not None:
+            key, value = metric
+            self._append(store.make_edit(session.id, **{EXTRA_PREFIX + key: value}))
+            self.bar.ok(f"{self._display_name(session.skill)} {key} is now {value}")
+            return
         minutes, error = parse_duration(command.args[1])
         if error or minutes is None:
             self.bar.fail(error or "bad duration")
@@ -278,6 +295,32 @@ class TenxApp(App):
         self._render_detail(skill_id)
         self.bar.ok(f"{self._display_name(skill_id)} - :rm <n> or :edit <n> <duration>, escape to close")
 
+    def _cmd_metric(self, command: Command) -> None:
+        """Declare (or undeclare) a custom metric for one skill."""
+        skill_id, error = resolve_skill(command.args[0], self.data.skills)
+        if error or skill_id is None:
+            self.bar.fail(error or "unknown skill")
+            return
+        raw = command.args[1].lower()
+        dropping = raw.startswith("-")
+        key = raw.lstrip("-")
+        skill = next(s for s in self.data.skills if s.id == skill_id)
+        declared = set(skill.metrics)
+        if dropping and key not in declared:
+            self.bar.fail(f'{skill_id} has no metric "{key}"')
+            return
+        declared.discard(key) if dropping else declared.add(key)
+        self._save_skills(
+            [
+                dataclasses.replace(s, metrics=tuple(sorted(declared))) if s.id == skill_id else s
+                for s in self.data.skills
+            ]
+        )
+        if dropping:
+            self.bar.ok(f"{skill_id} no longer records {key} (logged values are kept)")
+        else:
+            self.bar.ok(f'{skill_id} now records {key} - log it with "{skill_id} 45m {key}=..."')
+
     def _cmd_sync(self, command: Command) -> None:
         self.syncer.request_pull()
         self.syncer.push_now()
@@ -288,7 +331,8 @@ class TenxApp(App):
             Path(command.args[1]).expanduser() if len(command.args) > 1 else self.root / "tenx-export.csv"
         )
         try:
-            count = store.export_csv(self.data.sessions.values(), target)
+            metrics = {key for skill in self.data.skills for key in skill.metrics}
+            count = store.export_csv(self.data.sessions.values(), target, metrics)
         except OSError as error:
             self.bar.fail(f"could not write {target}: {error}")
             return
@@ -373,7 +417,7 @@ class TenxApp(App):
             where = f"{self._display_name(clash.skill) if clash.skill else '?'} · {when}"
             assert clash.winner is not None and clash.loser is not None
             if clash.kind == "field":
-                lines.append(f"{number:>3}  {where} · {clash.field_name}")
+                lines.append(f"{number:>3}  {where} · {clash.field_name.removeprefix(EXTRA_PREFIX)}")
                 for label, side in (("kept", clash.winner), ("lost", clash.loser)):
                     value = _show(clash.field_name, side.value)
                     lines.append(f"     {label}  {side.device:<14}{value:<12}{side.ts}")
@@ -437,15 +481,18 @@ class TenxApp(App):
         self.last_list = [session.id for session in sessions]
         hours = self.agg.minutes_by_skill.get(skill_id, 0) / 60
         days = set(self.agg.daily_by_skill.get(skill_id, {}))
-        heading = "  ·  ".join(
-            [
-                self._display_name(skill_id),
-                f"{hours:,.1f}h",
-                level_label(hours),
-                f"streak {current_streak(days, self.today)}d (longest {longest_streak(days)}d)",
-                f"{self.agg.count_by_skill.get(skill_id, 0)} sessions",
-            ]
-        )
+        parts = [
+            self._display_name(skill_id),
+            f"{hours:,.1f}h",
+            level_label(hours),
+            f"streak {current_streak(days, self.today)}d (longest {longest_streak(days)}d)",
+            f"{self.agg.count_by_skill.get(skill_id, 0)} sessions",
+        ]
+        parts += [
+            f"{key} {total:,.10g}"
+            for key, total in sorted(metric_totals(self.data.sessions, skill_id).items())
+        ]
+        heading = "  ·  ".join(parts)
         self.query_one(DetailPanel).update_data(heading, sessions, self.today)
 
     # -- sync thread bridge --------------------------------------------------

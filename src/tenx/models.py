@@ -14,6 +14,11 @@ from typing import Any
 MAX_MINUTES = 24 * 60
 SKILL_ID_RE = re.compile(r"^[a-z0-9-]+$")
 PAYLOAD_KEYS = ("skill", "date", "minutes", "note")
+# Per-skill custom metrics (running has a distance, ML does not) travel in a
+# nested "extra" object on the line, and are flattened to "extra:<key>" in
+# memory so every field shares one last-writer-wins and collision path.
+EXTRA_PREFIX = "extra:"
+METRIC_KEY_RE = re.compile(r"^[a-z][a-z0-9_-]*$")
 # `ts` alone cannot order an add/edit/del written in the same second: they
 # share an id and a device, so the spec's (ts, id, device) tie-break leaves
 # them equal. Ranking the op kind makes replay total and deterministic.
@@ -31,6 +36,7 @@ class Skill:
     created: str
     archived: bool = False
     aliases: tuple[str, ...] = ()
+    metrics: tuple[str, ...] = ()
 
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "Skill":
@@ -38,12 +44,18 @@ class Skill:
         if not SKILL_ID_RE.match(skill_id):
             raise ValueError(f'invalid skill id "{skill_id}" - use lowercase letters, digits and dashes')
         aliases = tuple(str(a).strip().lower() for a in data.get("aliases") or ())
+        metrics = tuple(
+            key
+            for key in (str(m).strip().lower() for m in data.get("metrics") or ())
+            if METRIC_KEY_RE.match(key)
+        )
         return cls(
             id=skill_id,
             name=str(data.get("name") or skill_id),
             created=str(data.get("created") or dt.date.today().isoformat()),
             archived=bool(data.get("archived", False)),
             aliases=aliases,
+            metrics=metrics,
         )
 
     def to_dict(self) -> dict[str, Any]:
@@ -53,6 +65,7 @@ class Skill:
             "created": self.created,
             "archived": self.archived,
             "aliases": list(self.aliases),
+            "metrics": list(self.metrics),
         }
 
 
@@ -66,6 +79,7 @@ class Session:
     minutes: int
     note: str = ""
     ts: str = ""
+    extra: dict[str, Any] = field(default_factory=dict)
 
     @property
     def hours(self) -> float:
@@ -138,6 +152,17 @@ class Op:
         if not isinstance(ts, str) or not ts:
             raise InvalidOp("missing ts")
         payload = {k: _clean(k, data[k]) for k in PAYLOAD_KEYS if k in data}
+        extra = data.get("extra")
+        if isinstance(extra, dict):
+            payload.update(
+                {
+                    EXTRA_PREFIX + str(key).lower(): value
+                    for key, value in extra.items()
+                    if METRIC_KEY_RE.match(str(key).lower())
+                    and isinstance(value, (int, float, str))
+                    and not isinstance(value, bool)
+                }
+            )
         if name == "add":
             for required in ("skill", "date", "minutes"):
                 if required not in payload:
@@ -150,6 +175,13 @@ class Op:
             if key in self.fields:
                 value = self.fields[key]
                 data[key] = value.isoformat() if isinstance(value, dt.date) else value
+        extra = {
+            key[len(EXTRA_PREFIX) :]: value
+            for key, value in sorted(self.fields.items())
+            if key.startswith(EXTRA_PREFIX)
+        }
+        if extra:
+            data["extra"] = extra
         data["ts"] = self.ts
         return json.dumps(data, ensure_ascii=False, separators=(",", ":")) + "\n"
 

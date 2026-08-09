@@ -55,5 +55,7 @@ class DetailPanel(Static):
             text.append(f"{index:>3}  ", style="dim")
             text.append(f"{format_day(session.date, self.today):<12}")
             text.append(f"{format_duration(session.minutes):>6}  ")
+            for key, value in sorted(session.extra.items()):
+                text.append(f"{key} {value}  ", style="cyan")
             text.append(note + "\n", style="dim")
         return text

@@ -230,3 +230,82 @@ def test_detail_shortcut_yields_to_a_real_duration():
 def test_parse_is_pure():
     """Same inputs, same output - nothing here reads a clock or urandom."""
     assert add("ml 1h30 sweep") == add("ml 1h30 sweep")
+
+
+# --- custom metrics ---------------------------------------------------------
+
+RUN = Skill("run", "running", "2026-01-01", metrics=("distance", "shoes"))
+METRIC_SKILLS = [RUN, Skill("ml", "machine learning", "2026-01-01")]
+
+
+def metric_add(text):
+    return parse(text, METRIC_SKILLS, TODAY)
+
+
+def test_a_declared_metric_is_pulled_out_of_the_note():
+    result = metric_add("run 45m distance=8.2")
+    assert isinstance(result, QuickAdd)
+    assert result.metrics == {"distance": 8.2}
+    assert result.note == ""
+
+
+def test_metrics_can_sit_anywhere_after_the_duration():
+    result = metric_add("run 45m easy distance=8.2 shoes=vaporfly")
+    assert isinstance(result, QuickAdd)
+    assert result.metrics == {"distance": 8.2, "shoes": "vaporfly"}
+    assert result.note == "easy"
+
+
+def test_a_metric_does_not_shadow_the_date():
+    """Metrics come out first, so what remains still starts at position 3."""
+    result = metric_add("run 45m distance=8.2 yesterday easy pace")
+    assert isinstance(result, QuickAdd)
+    assert result.date == dt.date(2026, 8, 8)
+    assert result.metrics == {"distance": 8.2} and result.note == "easy pace"
+
+
+def test_an_undeclared_key_stays_in_the_note():
+    """ml has no `loss` metric, so this is just text - declaring is what makes
+    a key a metric, which keeps notes with equals signs intact."""
+    result = metric_add("ml 1h loss=0.23 after 3 epochs")
+    assert isinstance(result, QuickAdd)
+    assert result.metrics == {} and result.note == "loss=0.23 after 3 epochs"
+
+
+def test_a_note_with_an_equals_sign_is_left_alone():
+    result = metric_add("run 30m todo: check a=b")
+    assert isinstance(result, QuickAdd)
+    assert result.metrics == {} and result.note == "todo: check a=b"
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("run 45m distance=8", 8),
+        ("run 45m distance=8.2", 8.2),
+        ("run 45m shoes=vaporfly", "vaporfly"),
+        ("run 45m distance=-3", -3),
+    ],
+)
+def test_metric_values_keep_their_type(text, expected):
+    result = metric_add(text)
+    assert isinstance(result, QuickAdd)
+    assert list(result.metrics.values()) == [expected]
+
+
+def test_an_empty_metric_value_is_not_a_metric():
+    result = metric_add("run 45m distance=")
+    assert isinstance(result, QuickAdd)
+    assert result.metrics == {} and result.note == "distance="
+
+
+def test_metric_command():
+    assert parse(":metric run distance", METRIC_SKILLS, TODAY) == Command(
+        name="metric", args=("run", "distance"), rest="run distance"
+    )
+    assert isinstance(parse(":metric run -distance", METRIC_SKILLS, TODAY), Command)
+
+
+@pytest.mark.parametrize("text", [":metric run", ":metric run BAD KEY", ":metric run 9lives", ":metric"])
+def test_metric_command_rejects(text):
+    assert isinstance(parse(text, METRIC_SKILLS, TODAY), ParseError)

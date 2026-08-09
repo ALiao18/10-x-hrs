@@ -61,7 +61,7 @@ def _add(text: str) -> int:
         print("✗ `tenx add` takes a quick-add line, not a command", file=sys.stderr)
         return 1
 
-    op = store.make_add(intent.skill, intent.date, intent.minutes, intent.note)
+    op = store.make_add(intent.skill, intent.date, intent.minutes, intent.note, extra=intent.metrics)
     store.append_op(store.log_path(root, config.device_id), op)
 
     name = next((s.name for s in loaded.skills if s.id == intent.skill), intent.skill)

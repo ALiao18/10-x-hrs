@@ -21,7 +21,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .ids import new_ulid
-from .models import PAYLOAD_KEYS, Collision, InvalidOp, Op, Party, Session, Skill, utc_now
+from .models import EXTRA_PREFIX, Collision, InvalidOp, Op, Party, Session, Skill, utc_now
 
 
 class StoreError(Exception):
@@ -89,14 +89,12 @@ def make_add(
     minutes: int,
     note: str = "",
     ts: str | None = None,
+    extra: dict[str, Any] | None = None,
 ) -> Op:
     """Mint an add op. Parsing stays pure by leaving the ULID and clock here."""
-    return Op(
-        op="add",
-        id=new_ulid(),
-        ts=ts or utc_now(),
-        fields={"skill": skill, "date": when, "minutes": minutes, "note": note},
-    )
+    fields: dict[str, Any] = {"skill": skill, "date": when, "minutes": minutes, "note": note}
+    fields.update({EXTRA_PREFIX + key: value for key, value in (extra or {}).items()})
+    return Op(op="add", id=new_ulid(), ts=ts or utc_now(), fields=fields)
 
 
 def commit_message(op: Op) -> str:
@@ -161,9 +159,7 @@ class _Record:
         value), so the caller can decide which of them were real disagreements.
         """
         displaced: list[tuple[str, tuple, Any]] = []
-        for name in PAYLOAD_KEYS:
-            if name not in op.fields:
-                continue
+        for name in sorted(op.fields):  # payload keys and extra:<metric> alike
             if name not in self.keys:
                 self.fields[name] = op.fields[name]
                 self.keys[name] = op.sort_key
@@ -272,6 +268,11 @@ def replay(ops: Iterable[Op]) -> tuple[dict[str, Session], int, list[Collision]]
             minutes=record.fields["minutes"],
             note=record.fields.get("note", ""),
             ts=latest_ts.get(op_id, ""),
+            extra={
+                key[len(EXTRA_PREFIX) :]: value
+                for key, value in record.fields.items()
+                if key.startswith(EXTRA_PREFIX)
+            },
         )
         for op_id, record in records.items()
     }
@@ -321,11 +322,19 @@ def load(root: Path) -> LoadResult:
     )
 
 
-def export_csv(sessions: Iterable[Session], path: Path) -> int:
+def export_csv(sessions: Iterable[Session], path: Path, metrics: Iterable[str] = ()) -> int:
+    """Flat dump. Custom metrics become columns, which is what makes them
+    queryable in anything that reads a CSV."""
     rows = sorted(sessions, key=lambda s: (s.date, s.id))
+    # Anything observed in the log is exported even if no longer declared, so
+    # undeclaring a metric never hides data you already recorded.
+    columns = sorted({*metrics, *(key for row in rows for key in row.extra)})
     with open(path, "w", encoding="utf-8", newline="") as fh:
         writer = csv.writer(fh)
-        writer.writerow(["date", "skill", "minutes", "note", "id"])
+        writer.writerow(["date", "skill", "minutes", "note", "id", *columns])
         for s in rows:
-            writer.writerow([s.date.isoformat(), s.skill, s.minutes, s.note, s.id])
+            writer.writerow(
+                [s.date.isoformat(), s.skill, s.minutes, s.note, s.id]
+                + [s.extra.get(key, "") for key in columns]
+            )
     return len(rows)

@@ -186,6 +186,19 @@ def sparkline_values(daily: dict[dt.date, int], today: dt.date, days: int = SPAR
     return [daily.get(start + dt.timedelta(days=offset), 0) for offset in range(days)]
 
 
+def metric_totals(sessions: dict[str, Session], skill: str) -> dict[str, float]:
+    """Sum the numeric custom metrics for one skill. Text metrics (a shoe
+    model, a route name) have no total and are skipped."""
+    totals: dict[str, float] = {}
+    for session in sessions.values():
+        if session.skill != skill:
+            continue
+        for key, value in session.extra.items():
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                totals[key] = totals.get(key, 0) + value
+    return totals
+
+
 def recent_sessions(sessions: dict[str, Session], skill: str | None = None, limit: int = 20) -> list[Session]:
     """Newest first - the list `:rm <n>` and `:edit <n>` index into."""
     pool = [s for s in sessions.values() if skill is None or s.skill == skill]

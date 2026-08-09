@@ -1,5 +1,6 @@
 """Append safety and replay determinism - the multi-machine guarantees."""
 
+import csv
 import datetime as dt
 import json
 import subprocess
@@ -9,6 +10,7 @@ import textwrap
 from tenx.models import Op
 from tenx.store import (
     append_op,
+    make_add,
     ends_with_newline,
     export_csv,
     load,
@@ -470,3 +472,103 @@ def test_collisions_do_not_depend_on_read_order():
     backward = replay(list(reversed(ops)))[2]
     assert forward == backward
     assert {c.kind for c in forward} == {"field", "deleted"}
+
+
+# --- custom metrics ---------------------------------------------------------
+
+
+def test_metrics_round_trip_through_the_log(tmp_path):
+    path = log_path(tmp_path, "mac")
+    append_op(path, make_add("run", DAY, 45, "easy", extra={"distance": 8.2, "shoes": "vaporfly"}))
+    line = json.loads(path.read_text())
+    assert line["extra"] == {"distance": 8.2, "shoes": "vaporfly"}, "nested, not top level"
+    (session,) = replay(read_ops(tmp_path)[0])[0].values()
+    assert session.extra == {"distance": 8.2, "shoes": "vaporfly"}
+    assert session.minutes == 45 and session.note == "easy"
+
+
+def test_a_metric_can_be_edited_without_touching_the_rest(tmp_path):
+    path = log_path(tmp_path, "mac")
+    append_op(path, make_add("run", DAY, 45, "easy", ts="2026-08-09T10:00:00Z", extra={"distance": 8.2}))
+    session_id = next(iter(replay(read_ops(tmp_path)[0])[0]))
+    append_op(
+        path,
+        Op(op="edit", id=session_id, ts="2026-08-09T11:00:00Z", fields={"extra:distance": 8.6}),
+    )
+    (session,) = replay(read_ops(tmp_path)[0])[0].values()
+    assert session.extra == {"distance": 8.6}
+    assert session.minutes == 45 and session.note == "easy", "untouched fields survive"
+
+
+def test_metrics_collide_like_any_other_field():
+    fields = {"skill": "run", "date": DAY, "minutes": 45, "extra:distance": 8.2}
+    _, _, clashes = replay(
+        [
+            Op("add", "A", "2020-01-01T10:00:00Z", fields, "mac"),
+            Op("edit", "A", SAME, {"extra:distance": 8.6}, "mac"),
+            Op("edit", "A", SAME, {"extra:distance": 9.1}, "laptop"),
+        ]
+    )
+    assert len(clashes) == 1
+    assert clashes[0].field_name == "extra:distance"
+    assert {clashes[0].winner.value, clashes[0].loser.value} == {8.6, 9.1}
+
+
+def test_a_line_with_a_junk_extra_block_still_loads(tmp_path):
+    write_lines(
+        tmp_path,
+        "mac",
+        [
+            json.dumps(
+                {
+                    "op": "add",
+                    "id": "A",
+                    "skill": "run",
+                    "date": "2026-08-09",
+                    "minutes": 45,
+                    "extra": {"distance": 8.2, "BAD KEY": 1, "nested": {"a": 1}, "flag": True},
+                    "ts": "2026-08-09T10:00:00Z",
+                }
+            ),
+            json.dumps(
+                {
+                    "op": "add",
+                    "id": "B",
+                    "skill": "run",
+                    "date": "2026-08-09",
+                    "minutes": 30,
+                    "extra": "not an object",
+                    "ts": "2026-08-09T10:00:00Z",
+                }
+            ),
+        ],
+    )
+    ops, unreadable = read_ops(tmp_path)
+    sessions, _, _ = replay(ops)
+    assert unreadable == 0
+    assert sessions["A"].extra == {"distance": 8.2}, "only usable scalars with valid keys survive"
+    assert sessions["B"].extra == {}
+
+
+def test_export_gives_every_metric_a_column(tmp_path):
+    path = log_path(tmp_path, "mac")
+    append_op(path, make_add("run", DAY, 45, "easy", extra={"distance": 8.2}))
+    append_op(path, make_add("ml", DAY, 60, "sweep"))
+    out = tmp_path / "out.csv"
+    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    export_csv(sessions.values(), out, ["distance", "elevation"])
+    rows = list(csv.reader(out.read_text().splitlines()))
+    assert rows[0] == ["date", "skill", "minutes", "note", "id", "distance", "elevation"]
+    by_skill = {row[1]: row for row in rows[1:]}
+    assert by_skill["run"][5] == "8.2"
+    assert by_skill["ml"][5] == "", "a skill without the metric leaves it blank"
+
+
+def test_export_keeps_columns_for_undeclared_metrics(tmp_path):
+    """Undeclaring a metric must not hide values already recorded."""
+    path = log_path(tmp_path, "mac")
+    append_op(path, make_add("run", DAY, 45, extra={"distance": 8.2}))
+    out = tmp_path / "out.csv"
+    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    export_csv(sessions.values(), out, metrics=())
+    assert "distance" in out.read_text().splitlines()[0]

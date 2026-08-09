@@ -71,6 +71,40 @@ Durations accept `N`, `Nm`, `Nh`, `N.Mh`, `NhMm`, `NhM`, up to 24h per
 session. Dates accept `today`, `yesterday`, `mon`–`sun`, `M/D`,
 `YYYY-MM-DD`, and `-1`/`-2` for days ago. Future dates are rejected.
 
+## Custom metrics
+
+Every session records duration and date. Some skills want more — running has a
+distance, ML does not — so each skill declares its own extra fields:
+
+```
+> :metric run distance
+run now records distance - log it with "run 45m distance=..."
+
+> run 45m distance=8.2 shoes=vaporfly easy pace
+✓ running +45m · today · 12.4h total
+```
+
+Declared keys are pulled out of the line wherever they sit, so the date still
+works after them (`run 45m distance=8.2 yesterday`). Values keep their type:
+numbers stay numbers so they can be summed, anything else is a label.
+
+**Declaring is what makes a key a metric.** An undeclared `loss=0.23` stays in
+the note, which is what keeps `todo: check a=b` intact. `:metric run -distance`
+stops recording one; values already logged are never touched.
+
+They are queryable without needing to be on screen. `:export csv` gives every
+metric its own column — including metrics you have since undeclared, so
+nothing you recorded can be hidden by a config change:
+
+```csv
+date,skill,minutes,note,id,distance,shoes
+2026-08-09,run,45,easy pace,01J2X…,8.2,vaporfly
+2026-08-09,ml,60,sweep,01J2Y…,,
+```
+
+The detail view (`d run`) also shows each session's metrics and totals the
+numeric ones in its heading.
+
 ## Commands
 
 A leading `:` means a command (a colon inside a note is just a colon).
@@ -81,10 +115,11 @@ A leading `:` means a command (a colon inside a note is just a colon).
 | `:rename <id> <new name>` | change the display name only |
 | `:archive <id>` / `:unarchive <id>` | hide from the dashboard and heatmap |
 | `:rm <n\|id>` | tombstone a session |
-| `:edit <n\|id> <duration>` | change a duration |
+| `:edit <n\|id> <duration\|key=value>` | change a duration or a metric |
 | `:undo` | tombstone this session's last add |
 | `:filter <id>` / `:filter off` | scope the heatmap to one skill |
 | `:year <YYYY>` | scroll the heatmap |
+| `:metric <skill> <key>` / `-<key>` | declare or drop a custom metric |
 | `:detail <id>` (or `d <id>`) | per-skill view with numbered sessions |
 | `:sync` | force pull + push now |
 | `:conflicts` | list collisions the sort key had to guess at |
@@ -109,7 +144,15 @@ per line, one file per machine, always ending in a newline.
 {"op":"add","id":"01J2X8QW3M...","skill":"ml","date":"2026-08-09","minutes":90,"ts":"..."}
 {"op":"edit","id":"01J2X8QW3M...","minutes":105,"ts":"..."}
 {"op":"del","id":"01J2X8QW3M...","ts":"..."}
+{"op":"add","id":"01J2Y...","skill":"run","date":"2026-08-09","minutes":45,"extra":{"distance":8.2},"ts":"..."}
 ```
+
+Custom metrics ride in a nested `extra` object rather than as top-level keys,
+so they can never collide with a future field name. In memory they flatten to
+`extra:<key>` and share the same last-writer-wins and collision handling as
+everything else — a metric can be edited on its own, and two machines
+disagreeing about a distance is reported exactly like two disagreeing about a
+duration.
 
 Nothing is ever rewritten, so two machines logging offline on the same day
 union-merge cleanly on the next pull — no conflict, no prompt. Loading sorts
@@ -167,6 +210,28 @@ running older versions of `tenx`, since the log format did not change.
 Totals, levels, streaks and heatmap buckets are always derived, never stored.
 The git history is the backup: `git log -p sessions/` reconstructs any prior
 state.
+
+## Not built (yet)
+
+Deliberately out of scope for now, in rough order of how much they would add:
+
+- **Units on metrics.** `distance` is a bare number; there is nowhere to say
+  it means kilometres, and nothing converts.
+- **Querying in the app.** Metrics are queryable by exporting CSV and using
+  whatever you like. There is no `:query distance > 10`, no filtering of the
+  session list by metric, and no sorting by one.
+- **Metrics in the dashboard.** The table is hours/level/streak only; metrics
+  appear in the detail view and the export, not as columns or sparklines.
+- **Colouring the heatmap by a metric** rather than by minutes — "which days
+  did I run far", not "which days did I run long".
+- **Goals and targets**, per skill or per metric. The spec rules these out for
+  v1 and nothing here anticipates them.
+- **Non-scalar metrics.** Values are one number or one string; lists and
+  nested objects are dropped on read rather than stored.
+- **Resolving a `skills.json` conflict in-app.** Session logs union-merge, but
+  `skills.json` is a whole-file write; if two machines edit it at once, git
+  leaves markers and `tenx` reports the file as unreadable rather than
+  offering to merge it. Rare, and fixed by hand.
 
 ## Development
 

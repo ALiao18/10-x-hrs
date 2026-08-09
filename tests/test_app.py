@@ -5,6 +5,7 @@ driven by asyncio.run from a plain sync test.
 """
 
 import asyncio
+import csv
 import datetime as dt
 import functools
 
@@ -455,3 +456,98 @@ async def test_fix_without_listing_first(tmp_path):
     async with app.run_test() as pilot:
         await submit(pilot, ":fix 1 mine")
         assert "run :conflicts first" in app.query_one(CommandBar).last_message
+
+
+# --- custom metrics ---------------------------------------------------------
+
+
+@pilot_test
+async def test_declaring_a_metric_then_logging_it(tmp_path):
+    app = make_app(tmp_path, skills=("run", "ml"))
+    async with app.run_test() as pilot:
+        await submit(pilot, "run 45m distance=8.2")
+        session = next(iter(store.load(tmp_path).sessions.values()))
+        assert session.extra == {}, "undeclared, so it is still just note text"
+        assert session.note == "distance=8.2"
+
+        await submit(pilot, ":metric run distance")
+        assert store.load_skills(tmp_path)[0].metrics == ("distance",)
+
+        await submit(pilot, "run 50m distance=8.2 easy")
+        logged = [s for s in store.load(tmp_path).sessions.values() if s.minutes == 50]
+        assert logged[0].extra == {"distance": 8.2}
+        assert logged[0].note == "easy"
+
+
+@pilot_test
+async def test_metrics_show_in_the_detail_view_and_total_up(tmp_path):
+    app = make_app(tmp_path, skills=("run",))
+    async with app.run_test() as pilot:
+        await submit(pilot, ":metric run distance")
+        await submit(pilot, "run 45m distance=8.2 easy")
+        await submit(pilot, "run 60m distance=11.8 yesterday")
+        await submit(pilot, "d run")
+
+        body = app.query_one(DetailPanel).render().plain
+        assert "distance 8.2" in body and "distance 11.8" in body
+        assert "distance 20" in body, "the heading totals the numeric ones"
+
+
+@pilot_test
+async def test_a_metric_is_queryable_through_the_csv_export(tmp_path):
+    app = make_app(tmp_path, skills=("run", "ml"))
+    async with app.run_test() as pilot:
+        await submit(pilot, ":metric run distance")
+        await submit(pilot, ":metric run shoes")
+        await submit(pilot, "run 45m distance=8.2 shoes=vaporfly")
+        await submit(pilot, "ml 1h sweep")
+        await submit(pilot, f":export csv {tmp_path / 'out.csv'}")
+
+        rows = list(csv.reader((tmp_path / "out.csv").read_text().splitlines()))
+        assert rows[0] == ["date", "skill", "minutes", "note", "id", "distance", "shoes"]
+        by_skill = {row[1]: row for row in rows[1:]}
+        assert by_skill["run"][5:] == ["8.2", "vaporfly"]
+        assert by_skill["ml"][5:] == ["", ""], "a skill without the metric leaves it blank"
+
+
+@pilot_test
+async def test_undeclaring_a_metric_keeps_what_was_already_logged(tmp_path):
+    app = make_app(tmp_path, skills=("run",))
+    async with app.run_test() as pilot:
+        await submit(pilot, ":metric run distance")
+        await submit(pilot, "run 45m distance=8.2")
+        await submit(pilot, ":metric run -distance")
+
+        assert store.load_skills(tmp_path)[0].metrics == ()
+        session = next(iter(store.load(tmp_path).sessions.values()))
+        assert session.extra == {"distance": 8.2}, "the logged value is untouched"
+
+        await submit(pilot, f":export csv {tmp_path / 'out.csv'}")
+        assert "distance" in (tmp_path / "out.csv").read_text().splitlines()[0]
+
+
+@pilot_test
+async def test_metric_command_errors(tmp_path):
+    app = make_app(tmp_path, skills=("run",))
+    async with app.run_test() as pilot:
+        for bad in (":metric nosuch distance", ":metric run -never-declared", ":metric run 9lives"):
+            await submit(pilot, bad)
+            assert app.query_one(CommandBar).last_message.startswith("✗"), bad
+
+
+@pilot_test
+async def test_edit_changes_a_metric_as_well_as_a_duration(tmp_path):
+    app = make_app(tmp_path, skills=("run",))
+    async with app.run_test() as pilot:
+        await submit(pilot, ":metric run distance")
+        await submit(pilot, "run 45m distance=8.2 easy")
+        await submit(pilot, "d run")
+
+        await submit(pilot, ":edit 1 distance=8.6")
+        session = next(iter(store.load(tmp_path).sessions.values()))
+        assert session.extra == {"distance": 8.6}
+        assert session.minutes == 45 and session.note == "easy", "only the metric moved"
+
+        await submit(pilot, ":edit 1 50m")
+        session = next(iter(store.load(tmp_path).sessions.values()))
+        assert session.minutes == 50 and session.extra == {"distance": 8.6}
