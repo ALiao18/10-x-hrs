@@ -1,0 +1,232 @@
+"""Table-driven grammar tests. No filesystem, no clock - `today` is injected."""
+
+import datetime as dt
+
+import pytest
+
+from tenx.models import Skill
+from tenx.parse import Command, ParseError, QuickAdd, parse, parse_duration
+
+TODAY = dt.date(2026, 8, 9)  # a Sunday
+
+SKILLS = [
+    Skill("ml", "machine learning", "2026-01-01", aliases=("mlr",)),
+    Skill("lc", "leetcode", "2026-01-01"),
+    Skill("run", "running", "2026-01-01"),
+    Skill("poker", "poker", "2026-01-01"),
+    Skill("piano", "piano", "2026-01-01"),
+    Skill("go", "go", "2026-01-01"),
+    Skill("golang", "golang", "2026-01-01"),
+    Skill("old", "old thing", "2026-01-01", archived=True),
+]
+
+
+def add(text):
+    return parse(text, SKILLS, TODAY)
+
+
+# --- durations --------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,minutes",
+    [
+        ("ml 1h30", 90),
+        ("ml 90", 90),
+        ("ml 90m", 90),
+        ("ml 1.5h", 90),
+        ("ml 1h30m", 90),
+        ("ml 1h", 60),
+        ("ml 2h15", 135),
+        ("ml 24h", 1440),
+        ("ml 1", 1),
+    ],
+)
+def test_duration_forms(text, minutes):
+    result = add(text)
+    assert isinstance(result, QuickAdd), result
+    assert result.minutes == minutes
+
+
+@pytest.mark.parametrize("text", ["ml 0m", "ml 0", "ml -5m", "ml 25h", "ml 1h3o", "ml abc", "ml 1441"])
+def test_duration_rejects(text):
+    assert isinstance(add(text), ParseError)
+
+
+def test_fractional_hours_with_explicit_minutes_is_ambiguous():
+    assert parse_duration("1.5h30")[0] is None
+
+
+def test_empty_input():
+    assert isinstance(add(""), ParseError)
+    assert isinstance(add("   "), ParseError)
+
+
+def test_skill_without_duration():
+    result = add("ml")
+    assert isinstance(result, ParseError)
+    assert "1h30" in result.message
+
+
+# --- dates ------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "text,expected",
+    [
+        ("ml 1h", TODAY),
+        ("ml 1h today", TODAY),
+        ("ml 1h yesterday", dt.date(2026, 8, 8)),
+        ("ml 1h mon", dt.date(2026, 8, 3)),
+        ("ml 1h sun", TODAY),  # today, when the weekday matches
+        ("ml 1h friday", dt.date(2026, 8, 7)),
+        ("ml 1h -1", dt.date(2026, 8, 8)),
+        ("ml 1h -2", dt.date(2026, 8, 7)),
+        ("ml 1h 8/5", dt.date(2026, 8, 5)),
+        ("ml 1h 2026-08-05", dt.date(2026, 8, 5)),
+        ("ml 1h 12/28", dt.date(2025, 12, 28)),  # rolls back rather than rejecting
+        ("ml 1h 2024-02-29", dt.date(2024, 2, 29)),
+    ],
+)
+def test_date_forms(text, expected):
+    result = add(text)
+    assert isinstance(result, QuickAdd), result
+    assert result.date == expected
+
+
+@pytest.mark.parametrize("text", ["ml 1h 2027-01-01", "ml 1h 2/30", "ml 1h 13/1", "ml 1h 2026-13-01"])
+def test_date_rejects(text):
+    assert isinstance(add(text), ParseError)
+
+
+def test_iso_lookalikes_are_not_dates():
+    # date.fromisoformat also accepts 20260805 and 2026-W32-1; those must fall
+    # through to the note rather than silently becoming a date.
+    result = add("ml 1h 20260805 compact")
+    assert isinstance(result, QuickAdd)
+    assert result.date == TODAY
+    assert result.note == "20260805 compact"
+
+
+# --- notes ------------------------------------------------------------------
+
+
+def test_note_starting_with_a_digit_is_not_eaten_as_a_date():
+    result = add("ml 1h 5 papers read")
+    assert isinstance(result, QuickAdd)
+    assert result.date == TODAY
+    assert result.note == "5 papers read"
+
+
+def test_note_after_a_date():
+    result = add("poker 2h 8/5 deep stack notes")
+    assert isinstance(result, QuickAdd)
+    assert result.skill == "poker"
+    assert result.minutes == 120
+    assert result.date == dt.date(2026, 8, 5)
+    assert result.note == "deep stack notes"
+
+
+def test_colon_inside_a_note_is_not_a_command():
+    result = add("ml 1h todo: rerun the sweep")
+    assert isinstance(result, QuickAdd)
+    assert result.note == "todo: rerun the sweep"
+
+
+def test_no_note():
+    result = add("ml 1h30")
+    assert isinstance(result, QuickAdd)
+    assert result.note == ""
+
+
+# --- skill resolution -------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "token,expected",
+    [
+        ("ml", "ml"),
+        ("mlr", "ml"),  # exact alias
+        ("lee", "lc"),  # prefix of the display name
+        ("pok", "poker"),
+        ("go", "go"),  # exact id beats the "golang" prefix
+        ("gol", "golang"),
+        ("old", "old"),  # archived skills stay resolvable for backfill
+        ("ML", "ml"),  # case insensitive
+    ],
+)
+def test_skill_resolution(token, expected):
+    result = add(f"{token} 1h")
+    assert isinstance(result, QuickAdd), result
+    assert result.skill == expected
+
+
+def test_ambiguous_prefix_lists_candidates():
+    result = add("p 1h")
+    assert isinstance(result, ParseError)
+    assert "piano" in result.message and "poker" in result.message
+
+
+def test_unknown_skill_suggests_new():
+    result = add("xyz 1h")
+    assert isinstance(result, ParseError)
+    assert ":new xyz" in result.message
+
+
+# --- commands ---------------------------------------------------------------
+
+
+def test_command_parsing():
+    result = add(":new ml machine learning")
+    assert isinstance(result, Command)
+    assert result.name == "new"
+    assert result.args == ("ml", "machine", "learning")
+    assert result.rest == "ml machine learning"
+
+
+@pytest.mark.parametrize(
+    "text,name",
+    [(":undo", "undo"), (":sync", "sync"), (":q", "q"), (":filter off", "filter"), (":year 2024", "year")],
+)
+def test_simple_commands(text, name):
+    result = add(text)
+    assert isinstance(result, Command)
+    assert result.name == name
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        ":nope",  # unknown command
+        ":",  # no command at all
+        ":new",  # missing args
+        ":rename ml",  # missing args
+        ":archive",  # missing args
+        ":archive a b",  # extra args
+        ":undo now",  # extra args
+        ":year 26",  # not a 4-digit year
+        ":export json",  # only csv
+        ":edit 3",  # missing duration
+    ],
+)
+def test_command_rejects(text):
+    assert isinstance(add(text), ParseError)
+
+
+def test_detail_shortcut():
+    result = add("d ml")
+    assert isinstance(result, Command)
+    assert result.name == "detail"
+    assert result.args == ("ml",)
+
+
+def test_detail_shortcut_yields_to_a_real_duration():
+    skills = SKILLS + [Skill("d", "drawing", "2026-01-01")]
+    result = parse("d 30m", skills, TODAY)
+    assert isinstance(result, QuickAdd)
+    assert result.skill == "d"
+
+
+def test_parse_is_pure():
+    """Same inputs, same output - nothing here reads a clock or urandom."""
+    assert add("ml 1h30 sweep") == add("ml 1h30 sweep")
