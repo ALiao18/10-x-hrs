@@ -132,7 +132,8 @@ def init(root: Path | None = None, remote: str | None = None, device_id: str | N
                 cloned = True
                 messages.append(f"cloned {remote}")
             else:
-                messages.append(f"could not clone {remote} - starting a fresh repo ({err.splitlines()[-1] if err else 'unknown error'})")
+                reason = err.splitlines()[-1] if err else "unknown error"
+                messages.append(f"could not clone {remote} - starting a fresh repo ({reason})")
         if not (root / ".git").is_dir():
             root.mkdir(parents=True, exist_ok=True)
             code, _, err = git(root, "init", "-b", "main")
@@ -157,19 +158,25 @@ def init(root: Path | None = None, remote: str | None = None, device_id: str | N
     if not DEVICE_RE.match(resolved):
         raise InitError(f'device id "{resolved}" must match [a-z0-9-]+')
 
-    log = store.log_path(root, resolved)
-    if existing is None and log.exists() and log.stat().st_size > 0:
+    # A log that is *tracked* came from the remote, so another machine claimed
+    # this id. Checking the file size instead would miss it: a freshly
+    # initialised log is zero bytes until that machine logs its first session.
+    claimed = git(root, "ls-files", "--error-unmatch", f"sessions/{resolved}.jsonl")[0] == 0
+    if existing is None and claimed:
         raise InitError(
-            f"sessions/{resolved}.jsonl already exists and was written by another machine.\n"
-            f"Two machines sharing a device id will collide - re-run with:\n"
-            f"    tenx init --device-id <another-name>"
+            f'sessions/{resolved}.jsonl is already in the remote, so another machine has claimed "{resolved}".\n'
+            f"Two machines sharing a device id write to one file and will conflict. Re-run with:\n"
+            f"    tenx init --device-id <another-name>\n"
+            f"(If this *is* that machine and you only lost config.json, re-run with --device-id {resolved}.)"
         )
 
-    store.ensure_log(log)
+    store.ensure_log(store.log_path(root, resolved))
     save_config(root, existing or Config(device_id=resolved))
 
     if not gitattributes_ok(root):
-        raise InitError(f"{root}/.gitattributes is missing the union-merge rule; concurrent logs would conflict")
+        raise InitError(
+            f"{root}/.gitattributes is missing the union-merge rule; concurrent logs would conflict"
+        )
 
     git(root, "add", "-A")
     git(root, "commit", "-m", f"tenx: init {resolved}")

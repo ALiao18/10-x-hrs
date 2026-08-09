@@ -1,0 +1,54 @@
+Screen {
+    layout: vertical;
+    background: $surface;
+}
+
+#header {
+    height: 1;
+    padding: 0 1;
+    color: $text-muted;
+    background: $panel;
+}
+
+SkillTable {
+    height: auto;
+    max-height: 14;
+    margin: 1 1 0 1;
+    background: $surface;
+}
+
+Heatmap {
+    height: 9;
+    margin: 1 1 0 1;
+}
+
+DetailPanel {
+    height: auto;
+    max-height: 14;
+    margin: 1 1 0 1;
+    padding: 0 1;
+    border-left: outer $accent;
+}
+
+CommandBar {
+    dock: bottom;
+    height: 4;
+    padding: 0 1;
+}
+
+CommandBar Input {
+    border: none;
+    height: 1;
+    padding: 0;
+    background: $surface;
+}
+
+#echo {
+    height: 1;
+    padding: 0 1;
+    color: $success;
+}
+
+#echo.error {
+    color: $error;
+}
