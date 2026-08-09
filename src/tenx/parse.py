@@ -228,3 +228,16 @@ def format_duration(minutes: int) -> str:
     if hours:
         return f"{hours}h"
     return f"{mins}m"
+
+
+def format_day(when: dt.date, today: dt.date) -> str:
+    delta = (today - when).days
+    if delta == 0:
+        return "today"
+    if delta == 1:
+        return "yesterday"
+    if delta < 7:
+        return when.strftime("%a")
+    if when.year == today.year:
+        return when.strftime("%-d %b")
+    return when.strftime("%-d %b %Y")

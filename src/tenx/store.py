@@ -90,6 +90,15 @@ def make_add(skill: str, when: dt.date, minutes: int, note: str = "", ts: str | 
     )
 
 
+def commit_message(op: Op) -> str:
+    """The one-line git subject for an op, shared by the TUI and `tenx add`."""
+    if op.op == "add":
+        hours, mins = divmod(op.fields["minutes"], 60)
+        length = f"{hours}h{mins:02d}" if hours and mins else (f"{hours}h" if hours else f"{mins}m")
+        return f"log: {op.fields['skill']} {length} {op.fields['date'].isoformat()}"
+    return f"log: {op.op} {op.id}"
+
+
 def make_edit(op_id: str, ts: str | None = None, **changed: Any) -> Op:
     return Op(op="edit", id=op_id, ts=ts or utc_now(), fields=dict(changed))
 
