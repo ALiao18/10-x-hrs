@@ -4,18 +4,19 @@ A terminal UI for logging deliberate practice across skills, with a
 git-contribution-style heatmap for consistency and cumulative hour totals per
 skill.
 
-Manual entry only — no timers. Multi-machine sync over git, with append-only
-logs that union-merge instead of conflicting.
+Manual entry only — no timers, no goals, no server. Multi-machine sync over
+git, with append-only logs that union-merge instead of conflicting.
 
 ```
+⇅ synced  ·  1,553.5h across 5 skills  ·  streak 5d (longest 20d)  ·  2026
+
   skill              hours    level   progress          streak   last 30d
   machine learning   614.0    10²     ███████░░░  57%   12d      ▂▅█▃▁▄█▂
   leetcode            88.5    10¹     ██████░░░░  65%   12d      ▁▃▂▅▂▁▃▁
-  poker              310.2    10²     ████░░░░░░  23%    3d      ▅▁▁▇▂▁▁▄
+  poker                75.4    10¹     ████░░░░░░  23%    3d      ▅▁▁▇▂▁▁▄
 
   Aug   Sep   Oct   Nov   Dec   Jan   Feb   Mar   Apr   May   Jun   Jul
   ░▓█░░▒▓█▒░░▓█▓▒░░░▒▓█▓▒░░▒▓██▓▒░░▒▓█▓▒░▒▓█▓░░▒▓█▓▒░░▒▓█▓▒▒░▓█▓▒░░▒▓█
-  ...
 
 > ml 2h15 attention ablation
 ✓ machine learning +2h15 · today · 614.0h total
@@ -29,209 +30,28 @@ uv tool install git+https://github.com/<user>/tenx
 pipx install git+https://github.com/<user>/tenx
 ```
 
-## Set up
-
-Your hours live in a **separate, private** repo so this one can stay public.
+## Quick start
 
 ```bash
-tenx init --remote git@github.com:<user>/tenx-data.git
+tenx init --remote git@github.com:<user>/tenx-data.git   # or omit --remote for local-only
+tenx
 ```
 
-That clones the remote into `~/.tenx` (or creates it), writes the
-`merge=union` `.gitattributes` that makes concurrent logging conflict-free,
-and claims a device id derived from your hostname. On a second machine, run
-the same command — if the device id is already taken, `init` stops and asks
-you to pick another with `--device-id`.
+Then just type: `<skill> <duration> [date] [note...]`, e.g. `ml 1h30 optimizer sweep`.
+A leading `:` is a command — `:new`, `:rm`, `:detail`, `:sync`, and a dozen
+others. Full grammar, every command, custom metrics, and multi-machine
+conflict handling are in the **[user guide](docs/USER_GUIDE.md)**.
 
-Set `TENX_HOME` to point at a different data directory.
+## Documentation
 
-## Logging
-
-Just type. A bare line is a quick-add:
-
-```
-<skill> <duration> [date] [note...]
-```
-
-| you type | you get |
-| --- | --- |
-| `ml 1h30` | machine learning, 90 min, today |
-| `ml 90` | bare number means minutes |
-| `ml 90m` · `ml 1.5h` · `ml 1h30m` | all 90 min |
-| `run 45m yesterday` | 45 min, yesterday |
-| `lc 25m mon` | most recent Monday |
-| `poker 2h 8/5 deep stack notes` | 5 Aug, with a note |
-| `ml 1h 2026-08-05 grid search` | explicit ISO date |
-
-Skills resolve by exact id, then alias, then unique prefix — so `lc` finds
-`leetcode`. Dates are only read from the third position, which is why
-`ml 1h 5 papers read` keeps "5 papers read" as the note.
-
-Durations accept `N`, `Nm`, `Nh`, `N.Mh`, `NhMm`, `NhM`, up to 24h per
-session. Dates accept `today`, `yesterday`, `mon`–`sun`, `M/D`,
-`YYYY-MM-DD`, and `-1`/`-2` for days ago. Future dates are rejected.
-
-## Custom metrics
-
-Every session records duration and date. Some skills want more — running has a
-distance, ML does not — so each skill declares its own extra fields:
-
-```
-> :metric run distance
-run now records distance - log it with "run 45m distance=..."
-
-> run 45m distance=8.2 shoes=vaporfly easy pace
-✓ running +45m · today · 12.4h total
-```
-
-Declared keys are pulled out of the line wherever they sit, so the date still
-works after them (`run 45m distance=8.2 yesterday`). Values keep their type:
-numbers stay numbers so they can be summed, anything else is a label.
-
-**Declaring is what makes a key a metric.** An undeclared `loss=0.23` stays in
-the note, which is what keeps `todo: check a=b` intact. `:metric run -distance`
-stops recording one; values already logged are never touched.
-
-They are queryable without needing to be on screen. `:export csv` gives every
-metric its own column — including metrics you have since undeclared, so
-nothing you recorded can be hidden by a config change:
-
-```csv
-date,skill,minutes,note,id,distance,shoes
-2026-08-09,run,45,easy pace,01J2X…,8.2,vaporfly
-2026-08-09,ml,60,sweep,01J2Y…,,
-```
-
-The detail view (`d run`) also shows each session's metrics and totals the
-numeric ones in its heading.
-
-## Commands
-
-A leading `:` means a command (a colon inside a note is just a colon).
-
-| command | effect |
-| --- | --- |
-| `:new <id> [display name]` | create a skill |
-| `:rename <id> <new name>` | change the display name only |
-| `:archive <id>` / `:unarchive <id>` | hide from the dashboard and heatmap |
-| `:rm <n\|id>` | tombstone a session |
-| `:edit <n\|id> <duration\|key=value>` | change a duration or a metric |
-| `:undo` | tombstone this session's last add |
-| `:filter <id>` / `:filter off` | scope the heatmap to one skill |
-| `:year <YYYY>` | scroll the heatmap |
-| `:metric <skill> <key>` / `-<key>` | declare or drop a custom metric |
-| `:detail <id>` (or `d <id>`) | per-skill view with numbered sessions |
-| `:sync` | force pull + push now |
-| `:conflicts` | list collisions the sort key had to guess at |
-| `:fix <n> <action>` | settle one (see below) |
-| `:export csv [path]` | flat dump of live records |
-| `:q` | quit, flushing the push |
-
-`<n>` indexes the list you last looked at, so you rarely type an id.
-
-For scripting, there is a headless entry point that skips the TUI entirely:
-
-```bash
-tenx add "ml 1h30 optimizer sweep"
-```
-
-## How it stores things
-
-`~/.tenx/sessions/<device>.jsonl` is an append-only op log — one JSON object
-per line, one file per machine, always ending in a newline.
-
-```jsonl
-{"op":"add","id":"01J2X8QW3M...","skill":"ml","date":"2026-08-09","minutes":90,"ts":"..."}
-{"op":"edit","id":"01J2X8QW3M...","minutes":105,"ts":"..."}
-{"op":"del","id":"01J2X8QW3M...","ts":"..."}
-{"op":"add","id":"01J2Y...","skill":"run","date":"2026-08-09","minutes":45,"extra":{"distance":8.2},"ts":"..."}
-```
-
-Custom metrics ride in a nested `extra` object rather than as top-level keys,
-so they can never collide with a future field name. In memory they flatten to
-`extra:<key>` and share the same last-writer-wins and collision handling as
-everything else — a metric can be edited on its own, and two machines
-disagreeing about a distance is reported exactly like two disagreeing about a
-duration.
-
-Nothing is ever rewritten, so two machines logging offline on the same day
-union-merge cleanly on the next pull — no conflict, no prompt. Loading sorts
-every op by `(ts, op kind, id, device)` and folds them, last-writer-wins per
-field, which makes the result identical no matter what order the files are
-read in. Unreadable lines are skipped and counted, never dropped silently.
-
-## When two machines disagree
-
-Last-writer-wins settles almost everything by timestamp, and that is not a
-conflict — logging on the mac and editing on the laptop an hour later is just
-the normal flow. A conflict is the narrower case where **the tie-break, not
-the clock, picked the winner**. There are exactly two:
-
-| what happened | what the fold did |
-| --- | --- |
-| two machines wrote the same field **in the same second** | picked by device name — arbitrary |
-| a session deleted on one machine was **edited afterwards** on another | tombstone wins by rule, so a newer intent was dropped |
-
-Anything else — different timestamps, the same machine changing its mind, two
-machines that happened to write the same value — is not reported.
-
-They are raised where you will actually see them: in the status line, and
-appended to the echo of whatever you just typed. They never block a log.
-
-```
-> ml 45m
-✓ machine learning +45m · today · 2.5h total  ·  ⚠ 2 conflicts - :conflicts
-
-> :conflicts
-2 unresolved conflicts
-  1  machine learning · 2026-08-09 · minutes
-     kept  mac-studio    1h45        2020-01-01T11:00:00Z
-     lost  laptop        2h          2020-01-01T11:00:00Z
-     :fix 1 mine | theirs | newest | oldest
-  2  poker · 2026-08-09 · deleted on mac-studio,
-     then edited on laptop at 2020-01-01T12:00:00Z
-     :fix 2 keep | drop
-```
-
-Six fixed actions, four for a value and two for a deletion:
-
-| action | effect |
-| --- | --- |
-| `mine` / `theirs` | keep this machine's value, or the other one's |
-| `newest` / `oldest` | keep the later or earlier write — always available, even when neither side is this machine |
-| `keep` | bring back a session deleted elsewhere (as a new record; tombstones are absorbing) |
-| `drop` | confirm the deletion |
-
-A fix is just an ordinary `edit` or `del` written now. Because it carries a
-clearly later timestamp, nothing is left for the tie-break to guess at and the
-conflict is settled everywhere on the next sync — including on machines
-running older versions of `tenx`, since the log format did not change.
-
-Totals, levels, streaks and heatmap buckets are always derived, never stored.
-The git history is the backup: `git log -p sessions/` reconstructs any prior
-state.
-
-## Not built (yet)
-
-Deliberately out of scope for now, in rough order of how much they would add:
-
-- **Units on metrics.** `distance` is a bare number; there is nowhere to say
-  it means kilometres, and nothing converts.
-- **Querying in the app.** Metrics are queryable by exporting CSV and using
-  whatever you like. There is no `:query distance > 10`, no filtering of the
-  session list by metric, and no sorting by one.
-- **Metrics in the dashboard.** The table is hours/level/streak only; metrics
-  appear in the detail view and the export, not as columns or sparklines.
-- **Colouring the heatmap by a metric** rather than by minutes — "which days
-  did I run far", not "which days did I run long".
-- **Goals and targets**, per skill or per metric. The spec rules these out for
-  v1 and nothing here anticipates them.
-- **Non-scalar metrics.** Values are one number or one string; lists and
-  nested objects are dropped on read rather than stored.
-- **Resolving a `skills.json` conflict in-app.** Session logs union-merge, but
-  `skills.json` is a whole-file write; if two machines edit it at once, git
-  leaves markers and `tenx` reports the file as unreadable rather than
-  offering to merge it. Rare, and fixed by hand.
+- **[docs/USER_GUIDE.md](docs/USER_GUIDE.md)** — installing, logging,
+  commands, custom metrics, multi-machine sync, what happens when two
+  machines disagree, data format, exporting, troubleshooting.
+- **[docs/EXTENDING.md](docs/EXTENDING.md)** — architecture, the engine/UI
+  boundary and why it's enforced by a test, worked examples for adding a
+  command or a grammar element, how to extend the op-log format without
+  breaking older machines, testing conventions, and a running list of
+  ideas that are deliberately not built yet.
 
 ## Development
 
@@ -241,4 +61,5 @@ uv run pytest
 ```
 
 The engine (`models`, `ids`, `store`, `parse`, `stats`, `sync`, `config`)
-imports no Textual and is tested headlessly; there is a test that enforces it.
+imports no Textual and is tested headlessly — enforced by
+`tests/test_engine_isolation.py`, not just by convention.
