@@ -15,6 +15,7 @@ from tenx.stats import (
     level,
     level_label,
     longest_streak,
+    metric_totals,
     month_labels,
     progress,
     sparkline_values,
@@ -208,6 +209,21 @@ def test_sparkline_values():
     daily = {TODAY: 60, TODAY - dt.timedelta(days=2): 30}
     values = sparkline_values(daily, TODAY, days=5)
     assert values == [0, 0, 30, 0, 60]
+
+
+# --- metrics ------------------------------------------------------------------
+
+
+def test_metric_totals_returns_sum_and_mean():
+    sessions = {
+        "A": Session(id="A", skill="run", date=TODAY, minutes=45, extra={"distance": 8.0}),
+        "B": Session(id="B", skill="run", date=TODAY, minutes=30, extra={"distance": 4.0}),
+        "C": Session(id="C", skill="run", date=TODAY, minutes=45, extra={"shoes": "vaporfly"}),
+        "D": Session(id="D", skill="lc", date=TODAY, minutes=30, extra={"distance": 100.0}),
+    }
+    totals = metric_totals(sessions, "run")
+    assert totals["distance"] == (12.0, 6.0), "sum and mean over run's sessions only, not lc's"
+    assert "shoes" not in totals, "text metrics have no total"
 
 
 # --- aggregation ------------------------------------------------------------

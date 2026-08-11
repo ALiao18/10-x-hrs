@@ -126,8 +126,9 @@ ambiguous prefix lists the candidates; no match at all suggests `:new`.
 Archived skills still resolve, so you can backfill without unarchiving.
 
 **Durations** accept `N`, `Nm`, `Nh`, `N.Mh`, `NhMm`, `NhM` — up to 24 hours
-per session (`1.5h30` is rejected as ambiguous: is that 90 minutes plus 30,
-or 1.5 hours and 30 seconds?).
+per session, with `M` under 60 (`1h90` is rejected rather than silently read
+as 150 minutes) and `1.5h30` rejected as ambiguous: is that 90 minutes plus
+30, or 1.5 hours and 30 seconds?
 
 **Dates** accept `today`, `yesterday`, a weekday name (`mon`…`sun` or spelled
 out, meaning the most recent occurrence — today counts if today matches),
@@ -141,6 +142,14 @@ one of the forms above. Everything else becomes the note. This is why
 interpret `5` as a date — and why a note can't start with something that
 looks like a duration/date typo and get silently misparsed; it's positional,
 not fuzzy.
+
+**`M/D` is only trusted as a date when it's the whole third word and nothing
+follows it** — `lift 1h 12/8` logs to December 8, but `lift 1h 12/8 deadlift`
+keeps "12/8 deadlift" as the note, since a real note is far more likely to
+start with sets/reps notation (`3/4`, `5/3/1`, `12/8`) than a lone `M/D` is
+to actually be a date sitting next to more note text. A malformed `M/D`-shaped
+word (`13/45`) never kills the line either — it just falls back to note text
+instead of erroring.
 
 **Typos don't lose your input.** If a line doesn't parse, the text stays in
 the box and an error appears below it — fix in place and press enter again:
@@ -187,18 +196,26 @@ Metrics don't need to be visible anywhere to be useful — see
 Anything starting with `:` is a command (a colon in the middle of a note,
 like `todo: rerun`, is just a colon — only a *leading* `:` triggers this).
 
+Daily use:
+
+| command | effect |
+| --- | --- |
+| `d <id>` | open the per-skill panel: a numbered list of recent sessions, streaks, and metric totals |
+| `:rm <n\|id>` | tombstone a session — an append-only delete, not an in-place edit |
+| `:edit <n\|id> <duration\|key=value>` | change a session's duration, or one of its custom metrics |
+| `:undo` | tombstone the last session *this run of the app* added. The stack is in-memory only; after a restart it's empty and says so, rather than guessing and deleting something older |
+| `:filter <id>` / `:filter off` | scope the heatmap to one skill, or back to all of them |
+
+Occasional / admin:
+
 | command | effect |
 | --- | --- |
 | `:new <id> [display name]` | create a skill. `id` is lowercase letters/digits/dashes and immutable; the display name can be anything and is editable later |
 | `:rename <id> <new name>` | change the display name only — the id (and therefore every past session) is untouched |
 | `:archive <id>` / `:unarchive <id>` | hide a skill from the dashboard table and the heatmap. Its all-time hour total is still counted; its own detail view still works |
-| `:rm <n\|id>` | tombstone a session — an append-only delete, not an in-place edit |
-| `:edit <n\|id> <duration\|key=value>` | change a session's duration, or one of its custom metrics |
-| `:undo` | tombstone the last session *this run of the app* added. The stack is in-memory only; after a restart it's empty and says so, rather than guessing and deleting something older |
-| `:filter <id>` / `:filter off` | scope the heatmap to one skill, or back to all of them |
-| `:year <YYYY>` | scroll the heatmap to a different year |
 | `:metric <skill> <key>` / `:metric <skill> -<key>` | declare or stop recording a custom metric |
-| `:detail <id>` (or the shorthand `d <id>`) | open the per-skill panel: a numbered list of recent sessions, streaks, and metric totals |
+| `:default <minutes>` / `:default off` | a bare skill name (`train`, no duration) logs this many minutes instead of erroring |
+| `:year <YYYY>` | scroll the heatmap to a different year |
 | `:sync` | force an immediate pull + push, instead of waiting for the debounce |
 | `:conflicts` | list any collisions the sort key had to guess at (see below) |
 | `:fix <n> <action>` | settle one of them |
@@ -272,22 +289,29 @@ block a log:
   1  machine learning · 2026-08-09 · minutes
      kept  mac-studio    1h45        2020-01-01T11:00:00Z
      lost  laptop        2h          2020-01-01T11:00:00Z
-     :fix 1 mine | theirs | newest | oldest
+     :fix 1 mine | theirs
   2  poker · 2026-08-09 · deleted on mac-studio,
      then edited on laptop at 2020-01-01T12:00:00Z
      :fix 2 keep | drop
 ```
 
-Six fixed resolutions — no free-text merging, no prompts to design around:
+Four fixed resolutions — no free-text merging, no prompts to design around.
+There's no `newest`/`oldest`: a field collision is only ever reported when
+both writes share the exact same timestamp (see the table above), so
+"whichever happened later" has nothing to go on — it would just be picking
+by device name, which isn't a real answer. `mine`/`theirs` is honest about
+that: it asks you, not the clock.
 
 | action | applies to | effect |
 | --- | --- | --- |
 | `mine` | a field | keep this machine's value |
 | `theirs` | a field | keep the other machine's value |
-| `newest` | a field | keep whichever write happened later — works even when neither side is this machine |
-| `oldest` | a field | keep whichever write happened earlier |
 | `keep` | a deletion | restore the session as a **new** record (tombstones are absorbing — the original id stays dead) |
 | `drop` | a deletion | confirm the deletion; the newer edit is discarded |
+
+`mine`/`theirs` only works from one of the two machines that disagreed —
+resolve it there rather than from a third machine, which has no side to be
+"mine."
 
 A fix is just an ordinary `edit` or `del` written with the current
 timestamp. Because it's clearly newer than everything the tie-break was

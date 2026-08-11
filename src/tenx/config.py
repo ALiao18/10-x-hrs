@@ -28,6 +28,7 @@ class Config:
     device_id: str
     auto_sync: bool = True
     push_debounce_seconds: int = 30
+    default_minutes: int | None = None
 
 
 @dataclass
@@ -59,10 +60,12 @@ def load_config(root: Path) -> Config | None:
     device_id = str(data.get("device_id") or "")
     if not DEVICE_RE.match(device_id):
         return None
+    default_minutes = data.get("default_minutes")
     return Config(
         device_id=device_id,
         auto_sync=bool(data.get("auto_sync", True)),
         push_debounce_seconds=int(data.get("push_debounce_seconds", 30)),
+        default_minutes=int(default_minutes) if default_minutes else None,
     )
 
 
@@ -74,6 +77,7 @@ def save_config(root: Path, config: Config) -> None:
                 "device_id": config.device_id,
                 "auto_sync": config.auto_sync,
                 "push_debounce_seconds": config.push_debounce_seconds,
+                "default_minutes": config.default_minutes,
             },
             indent=2,
         )

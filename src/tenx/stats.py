@@ -186,17 +186,21 @@ def sparkline_values(daily: dict[dt.date, int], today: dt.date, days: int = SPAR
     return [daily.get(start + dt.timedelta(days=offset), 0) for offset in range(days)]
 
 
-def metric_totals(sessions: dict[str, Session], skill: str) -> dict[str, float]:
-    """Sum the numeric custom metrics for one skill. Text metrics (a shoe
-    model, a route name) have no total and are skipped."""
+def metric_totals(sessions: dict[str, Session], skill: str) -> dict[str, tuple[float, float]]:
+    """Sum and mean of the numeric custom metrics for one skill, as
+    (total, mean). Text metrics (a shoe model, a route name) have neither
+    and are skipped. Sum suits `distance`; mean suits `rpe`/`bodyweight`/
+    `pace` - showing both costs nothing and lets the reader pick."""
     totals: dict[str, float] = {}
+    counts: dict[str, int] = {}
     for session in sessions.values():
         if session.skill != skill:
             continue
         for key, value in session.extra.items():
             if isinstance(value, (int, float)) and not isinstance(value, bool):
                 totals[key] = totals.get(key, 0) + value
-    return totals
+                counts[key] = counts.get(key, 0) + 1
+    return {key: (total, total / counts[key]) for key, total in totals.items()}
 
 
 def recent_sessions(sessions: dict[str, Session], skill: str | None = None, limit: int = 20) -> list[Session]:

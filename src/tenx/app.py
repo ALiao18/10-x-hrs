@@ -12,7 +12,7 @@ from textual.binding import Binding
 from textual.widgets import Input, Static
 
 from . import store
-from .config import Config, data_dir, default_device_id, load_config
+from .config import Config, data_dir, default_device_id, load_config, save_config
 from .models import EXTRA_PREFIX, SKILL_ID_RE, Collision, Skill
 from .parse import (
     Command,
@@ -28,6 +28,7 @@ from .parse import (
 from .stats import (
     Aggregate,
     aggregate,
+    bucket_thresholds,
     current_streak,
     level_label,
     longest_streak,
@@ -111,7 +112,7 @@ class TenxApp(App):
 
     def on_input_submitted(self, event: Input.Submitted) -> None:
         event.stop()
-        text = event.value
+        text = self._apply_default_minutes(event.value)
         result = parse(text, self.data.skills, self.today)
         with self.batch_update():  # table and today's cell change in one frame
             if isinstance(result, ParseError):
@@ -121,6 +122,36 @@ class TenxApp(App):
             else:
                 self._command(result)
             self._nag_about_conflicts()
+
+    def on_input_changed(self, event: Input.Changed) -> None:
+        self.bar.set_hint(self._metric_hint(event.value))
+
+    def _metric_hint(self, text: str) -> str:
+        """Undeclared-in-this-line metric keys for whatever skill is typed so
+        far, so "lift 45m ▸ bodypart=" is discoverable without `d <skill>`."""
+        tokens = text.split()
+        if not tokens or tokens[0].startswith(":"):
+            return ""
+        skill_id, error = resolve_skill(tokens[0], self.data.skills)
+        if error or skill_id is None:
+            return ""
+        declared = next((s.metrics for s in self.data.skills if s.id == skill_id), ())
+        missing = [key for key in declared if not any(t.lower().startswith(f"{key}=") for t in tokens)]
+        if not missing:
+            return ""
+        return "▸ " + " ".join(f"{key}=" for key in missing)
+
+    def _apply_default_minutes(self, text: str) -> str:
+        """A bare skill name ("train") logs `default_minutes` if one is set -
+        the parser stays pure, so this rewrites the input before it gets there."""
+        if self.config.default_minutes is None:
+            return text
+        stripped = text.strip()
+        if not stripped or " " in stripped or stripped.startswith(":"):
+            return text
+        if parse_duration(stripped)[0] is not None:
+            return text  # already a bare duration, not a skill name
+        return f"{stripped} {self.config.default_minutes}m"
 
     def _nag_about_conflicts(self) -> None:
         """Raise unresolved conflicts on the entry itself.
@@ -151,8 +182,9 @@ class TenxApp(App):
     def refresh_views(self) -> None:
         self.query_one(SkillTable).update_rows(self.data.skills, self.agg, self.today)
         daily = self.agg.daily_by_skill.get(self.filter_skill, {}) if self.filter_skill else self.agg.daily
-        self.query_one(Heatmap).update_data(daily, self.agg.thresholds, self.year)
+        self.query_one(Heatmap).update_data(daily, bucket_thresholds(daily), self.year)
         self.query_one("#header", Static).update(self._header())
+        self.bar.set_today(self._today_line())
         if self.showing == "skill" and self.detail_skill:
             self._render_detail(self.detail_skill)
         elif self.showing == "conflicts":
@@ -170,9 +202,23 @@ class TenxApp(App):
         ]
         if self.data.unreadable:
             parts.append(f"⚠ {self.data.unreadable} unreadable lines")
+        if self.data.skipped_ops:
+            parts.append(f"⚠ {_plural(self.data.skipped_ops, 'orphan edit')}")
         if self.data.collisions:
             parts.append(f"⚠ {_plural(len(self.data.collisions), 'conflict')} · :conflicts")
         return "  ·  ".join(parts)
+
+    def _today_line(self) -> str:
+        per_skill = {
+            skill: minutes
+            for skill, daily in self.agg.daily_by_skill.items()
+            if (minutes := daily.get(self.today, 0))
+        }
+        if not per_skill:
+            return "today · nothing logged yet"
+        ordered = sorted(per_skill.items(), key=lambda kv: -kv[1])
+        bits = " · ".join(f"{self._display_name(skill)} {format_duration(minutes)}" for skill, minutes in ordered)
+        return f"today · {bits} = {format_duration(sum(per_skill.values()))}"
 
     def _display_name(self, skill_id: str) -> str:
         return next((s.name for s in self.data.skills if s.id == skill_id), f"⟨{skill_id}⟩")
@@ -186,9 +232,11 @@ class TenxApp(App):
         self.last_list = [op.id]
         self.reload()
         total = self.agg.minutes_by_skill.get(intent.skill, 0) / 60
+        metric_bits = " · ".join(f"{key} {value}" for key, value in intent.metrics.items())
         self.bar.ok(
             f"{self._display_name(intent.skill)} +{format_duration(intent.minutes)}"
-            f" · {format_day(intent.date, self.today)} · {total:,.1f}h total"
+            + (f" · {metric_bits}" if metric_bits else "")
+            + f" · {format_day(intent.date, self.today)} · {total:,.1f}h total"
         )
         self.syncer.note_write(store.commit_message(op))
 
@@ -238,7 +286,10 @@ class TenxApp(App):
         if session is None:
             return
         declared = next((s.metrics for s in self.data.skills if s.id == session.skill), ())
-        metric = parse_metric(command.args[1], declared)
+        metric, error = parse_metric(command.args[1], declared)
+        if error:
+            self.bar.fail(error)
+            return
         if metric is not None:
             key, value = metric
             self._append(store.make_edit(session.id, **{EXTRA_PREFIX + key: value}))
@@ -361,8 +412,8 @@ class TenxApp(App):
             self._fix_deleted(clash, action)
 
     def _fix_field(self, clash: Collision, action: str) -> None:
-        if action not in ("mine", "theirs", "newest", "oldest"):
-            self.bar.fail(f'"{action}" settles a deletion, not a value - use mine/theirs/newest/oldest')
+        if action not in ("mine", "theirs"):
+            self.bar.fail(f'"{action}" settles a deletion, not a value - use mine/theirs')
             return
         value, error = self._pick_side(clash, action)
         if error:
@@ -391,16 +442,12 @@ class TenxApp(App):
 
     def _pick_side(self, clash: Collision, action: str) -> tuple[Any, str | None]:
         assert clash.winner is not None and clash.loser is not None
-        if action == "newest":
-            return clash.winner.value, None
-        if action == "oldest":
-            return clash.loser.value, None
         me = self.config.device_id
         mine = next((side for side in (clash.winner, clash.loser) if side.device == me), None)
         theirs = next((side for side in (clash.winner, clash.loser) if side.device != me), None)
         if mine is None:
             others = f"{clash.winner.device} and {clash.loser.device}"
-            return None, f"neither side is this machine ({me}) - {others} disagreed, so use newest or oldest"
+            return None, f"neither side is this machine ({me}) - settle it from {others} instead"
         chosen = mine if action == "mine" else theirs
         assert chosen is not None
         return chosen.value, None
@@ -421,12 +468,21 @@ class TenxApp(App):
                 for label, side in (("kept", clash.winner), ("lost", clash.loser)):
                     value = _show(clash.field_name, side.value)
                     lines.append(f"     {label}  {side.device:<14}{value:<12}{side.ts}")
-                lines.append(f"     :fix {number} mine | theirs | newest | oldest")
+                lines.append(f"     :fix {number} mine | theirs")
             else:
                 lines.append(f"{number:>3}  {where} · deleted on {clash.winner.device},")
                 lines.append(f"     then {clash.loser.value}ed on {clash.loser.device} at {clash.loser.ts}")
                 lines.append(f"     :fix {number} keep | drop")
         panel.update_lines(_plural(len(self.conflict_list), "unresolved conflict"), lines)
+
+    def _cmd_default(self, command: Command) -> None:
+        raw = command.args[0].lower()
+        self.config.default_minutes = None if raw == "off" else int(raw)
+        save_config(self.root, self.config)
+        if self.config.default_minutes is None:
+            self.bar.ok("default duration cleared")
+        else:
+            self.bar.ok(f"a bare skill name now logs {format_duration(self.config.default_minutes)}")
 
     def _cmd_q(self, command: Command) -> None:
         self.exit()
@@ -489,8 +545,8 @@ class TenxApp(App):
             f"{self.agg.count_by_skill.get(skill_id, 0)} sessions",
         ]
         parts += [
-            f"{key} {total:,.10g}"
-            for key, total in sorted(metric_totals(self.data.sessions, skill_id).items())
+            f"{key} {total:,.10g} (avg {mean:,.10g})"
+            for key, (total, mean) in sorted(metric_totals(self.data.sessions, skill_id).items())
         ]
         heading = "  ·  ".join(parts)
         self.query_one(DetailPanel).update_data(heading, sessions, self.today)
