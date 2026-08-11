@@ -100,13 +100,30 @@ def test_edit_older_than_its_add_is_buffered_and_loses(tmp_path):
 
 
 def test_orphan_edit_without_an_add_is_dropped(tmp_path):
+    """The exact shape of a half-synced multi-machine state: an edit whose
+    add never showed up must not vanish without a trace - it's counted like
+    any other unusable op, not silently discarded."""
     write_lines(
         tmp_path,
         "mac",
         [Op(op="edit", id="GHOST", ts="2026-08-09T09:00:00Z", fields={"minutes": 10}).to_line()],
     )
-    sessions, _, _ = replay(read_ops(tmp_path)[0])
+    sessions, skipped, _ = replay(read_ops(tmp_path)[0])
     assert sessions == {}
+    assert skipped == 1
+
+
+def test_orphan_edit_for_an_already_deleted_id_is_also_counted(tmp_path):
+    """An edit that arrives for an id that was deleted before it ever had an
+    add is just as orphaned, and must be counted too."""
+    sessions, skipped, _ = replay(
+        [
+            Op(op="del", id="GHOST", ts="2026-08-09T09:00:00Z"),
+            Op(op="edit", id="GHOST", ts="2026-08-09T08:00:00Z", fields={"minutes": 10}),
+        ]
+    )
+    assert sessions == {}
+    assert skipped == 1
 
 
 def test_delete_then_edit_stays_deleted(tmp_path):

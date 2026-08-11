@@ -15,7 +15,7 @@ from tenx import store
 from tenx.app import TenxApp
 from tenx.config import init
 from tenx.models import Skill
-from tenx.stats import year_grid
+from tenx.stats import FIXED_CUTS, year_grid
 from tenx.widgets import CommandBar, DetailPanel, Heatmap, SkillTable
 
 
@@ -101,6 +101,29 @@ async def test_a_quick_add_updates_the_table_and_todays_cell(tmp_path):
 
         # And it is on disk, not just in memory.
         assert len(store.load(tmp_path).sessions) == 1
+
+
+@pilot_test
+async def test_today_line_reflects_whats_logged_so_far(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        assert app.query_one(CommandBar).today_text == "today · nothing logged yet"
+
+        await submit(pilot, "ml 1h30")
+        await submit(pilot, "lc 45m")
+        today = app.query_one(CommandBar).today_text
+        assert today.startswith("today · ")
+        assert "machine learning 1h30" in today and "leetcode 45m" in today
+        assert today.endswith("= 2h15")
+
+
+@pilot_test
+async def test_add_echo_includes_a_parsed_metric(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":metric ml distance")
+        await submit(pilot, "ml 45m distance=8.2")
+        assert "distance 8.2" in app.query_one(CommandBar).last_message
 
 
 @pilot_test
@@ -221,6 +244,86 @@ async def test_filter_and_year_scope_the_heatmap(tmp_path):
 
         await submit(pilot, ":year 2024")
         assert app.query_one(Heatmap).year == 2024
+
+
+@pilot_test
+async def test_filter_recomputes_heatmap_thresholds_for_the_shown_skill(tmp_path):
+    """Regression test: a filtered heatmap used to keep the globally-computed
+    quantile thresholds, so a low-volume skill's minutes got bucketed against
+    cuts sized for a much busier one and rendered almost entirely in bucket 1."""
+    app = make_app(tmp_path)
+    path = store.log_path(tmp_path, "test")
+    today = dt.date.today()
+    for i in range(35):
+        store.append_op(
+            path,
+            store.make_add(
+                "ml", today - dt.timedelta(days=i), 10 + i * 10, ts=f"2020-01-{i % 28 + 1:02d}T10:00:00Z"
+            ),
+        )
+    for i in range(3):
+        store.append_op(
+            path,
+            store.make_add("lc", today - dt.timedelta(days=i), 5 + i * 5, ts=f"2021-01-{i + 1:02d}T10:00:00Z"),
+        )
+    async with app.run_test() as pilot:
+        await pilot.pause()
+        global_thresholds = app.query_one(Heatmap).thresholds
+        assert global_thresholds != FIXED_CUTS, "35 varied days should trigger quantile buckets"
+
+        await submit(pilot, ":filter lc")
+        filtered_thresholds = app.query_one(Heatmap).thresholds
+        assert filtered_thresholds == FIXED_CUTS, "lc has too few days for quantiles - falls back to fixed cuts"
+        assert filtered_thresholds != global_thresholds
+
+
+@pilot_test
+async def test_default_minutes_lets_a_bare_skill_name_log(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, "ml")
+        assert app.query_one(CommandBar).last_message.startswith("✗"), "no default set yet"
+
+        await submit(pilot, ":default 20")
+        await submit(pilot, "ml")
+        row = next(r for r in cells(app) if r[0] == "machine learning")
+        assert row[1] == "0.3"  # 20 minutes
+
+        await submit(pilot, ":default off")
+        await submit(pilot, "ml")
+        assert app.query_one(CommandBar).last_message.startswith("✗"), "cleared default stops applying"
+
+
+@pilot_test
+async def test_default_minutes_does_not_hijack_a_real_duration(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":default 20")
+        await submit(pilot, "ml 1h")
+        row = next(r for r in cells(app) if r[0] == "machine learning")
+        assert row[1] == "1.0", "an explicit duration must win over the default"
+
+
+@pilot_test
+async def test_metric_hint_shows_undeclared_keys_for_the_typed_skill(tmp_path):
+    app = make_app(tmp_path)
+    async with app.run_test() as pilot:
+        await submit(pilot, ":metric ml distance")
+        await submit(pilot, ":metric ml rpe")
+
+        pilot.app.query_one(Input).value = "ml 45m"
+        await pilot.pause()
+        hint = app.query_one(CommandBar).hint_text
+        assert "distance=" in hint and "rpe=" in hint
+
+        pilot.app.query_one(Input).value = "ml 45m distance=8.2"
+        await pilot.pause()
+        hint = app.query_one(CommandBar).hint_text
+        assert "distance=" not in hint and "rpe=" in hint
+
+        pilot.app.query_one(Input).value = ""
+        await pilot.pause()
+        assert app.query_one(CommandBar).hint_text == ""
 
 
 @pilot_test
@@ -358,7 +461,7 @@ async def test_conflicts_lists_both_sides(tmp_path):
         body = panel.render().plain
         assert "test" in body and "laptop" in body
         assert "1h45" in body and "2h" in body  # 105 and 120 minutes
-        assert ":fix 1 mine | theirs | newest | oldest" in body
+        assert ":fix 1 mine | theirs" in body
 
 
 @pilot_test
@@ -385,15 +488,20 @@ async def test_fix_mine(tmp_path):
 
 
 @pilot_test
-async def test_fix_newest_and_oldest(tmp_path):
+async def test_fix_newest_and_oldest_are_rejected(tmp_path):
+    # A field collision only ever has tied timestamps (both sides wrote in
+    # the same second), so "whichever happened later" has nothing to go on -
+    # newest/oldest are cut from the vocabulary entirely, rejected at parse
+    # time like any other bad verb.
     app = make_app(tmp_path)
     plant_field_conflict(tmp_path)
     async with app.run_test() as pilot:
         await submit(pilot, ":conflicts")
-        loser = app.conflict_list[0].loser.value
-        await submit(pilot, ":fix 1 oldest")
-        assert minutes_now(tmp_path) == loser
-        assert store.load(tmp_path).collisions == []
+        for verb in ("newest", "oldest"):
+            await submit(pilot, f":fix 1 {verb}")
+            message = app.query_one(CommandBar).last_message
+            assert message.startswith("✗") and "usage" in message
+        assert store.load(tmp_path).collisions != [], "a rejected verb must not settle anything"
 
 
 @pilot_test
@@ -404,9 +512,11 @@ async def test_fix_falls_back_when_neither_side_is_this_machine(tmp_path):
         await submit(pilot, ":conflicts")
         await submit(pilot, ":fix 1 mine")
         message = app.query_one(CommandBar).last_message
-        assert message.startswith("✗") and "newest or oldest" in message
-        await submit(pilot, ":fix 1 newest")
-        assert store.load(tmp_path).collisions == []
+        assert message.startswith("✗") and "neither side is this machine" in message
+        await submit(pilot, ":fix 1 theirs")
+        message = app.query_one(CommandBar).last_message
+        assert message.startswith("✗"), "theirs has no more of a side here than mine does"
+        assert store.load(tmp_path).collisions != [], "unresolvable from a third machine"
 
 
 @pilot_test
@@ -445,7 +555,7 @@ async def test_the_wrong_verb_for_the_kind_explains_itself(tmp_path):
         await submit(pilot, ":conflicts")
         await submit(pilot, ":fix 1 keep")
         message = app.query_one(CommandBar).last_message
-        assert message.startswith("✗") and "mine/theirs/newest/oldest" in message
+        assert message.startswith("✗") and "mine/theirs" in message
         assert store.load(tmp_path).collisions != [], "a bad verb must not settle anything"
 
 

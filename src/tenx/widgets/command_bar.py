@@ -14,10 +14,14 @@ class CommandBar(Vertical):
     clears the input on a failure - a typo is fixed in place."""
 
     last_message = ""
+    today_text = ""
+    hint_text = ""
 
     def compose(self) -> ComposeResult:
         yield Input(placeholder="ml 1h30 attention ablation      (: for commands)", id="entry")
+        yield Static("", id="hint")
         yield Static("", id="echo")
+        yield Static("", id="today")
 
     @property
     def entry(self) -> Input:
@@ -26,6 +30,22 @@ class CommandBar(Vertical):
     @property
     def echo(self) -> Static:
         return self.query_one("#echo", Static)
+
+    @property
+    def hint(self) -> Static:
+        return self.query_one("#hint", Static)
+
+    @property
+    def today_line(self) -> Static:
+        return self.query_one("#today", Static)
+
+    def set_today(self, text: str) -> None:
+        self.today_text = text
+        self.today_line.update(text)
+
+    def set_hint(self, text: str) -> None:
+        self.hint_text = text
+        self.hint.update(text)
 
     def ok(self, message: str) -> None:
         self.last_message = f"✓ {message}"

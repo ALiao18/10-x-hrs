@@ -53,19 +53,19 @@ COMMANDS: dict[str, tuple[int, int | None, str]] = {
     "undo": (0, 0, ":undo"),
     "filter": (1, 1, ":filter <id> | :filter off"),
     "year": (1, 1, ":year <YYYY>"),
-    "detail": (1, 1, ":detail <id>"),
     "metric": (2, 2, ":metric <skill> <key> | :metric <skill> -<key>"),
     "sync": (0, 0, ":sync"),
     "export": (1, 2, ":export csv [path]"),
     "conflicts": (0, 0, ":conflicts"),
-    "fix": (2, 2, ":fix <n> <mine|theirs|newest|oldest|keep|drop>"),
+    "fix": (2, 2, ":fix <n> <mine|theirs|keep|drop>"),
+    "default": (1, 1, ":default <minutes|off>"),
     "q": (0, 0, ":q"),
 }
 
-# The whole resolution vocabulary. mine/theirs/newest/oldest settle a field
-# two machines disagreed on; keep/drop settle a session deleted on one machine
-# and edited on another.
-FIX_ACTIONS = ("mine", "theirs", "newest", "oldest", "keep", "drop")
+# The whole resolution vocabulary. mine/theirs settle a field two machines
+# disagreed on; keep/drop settle a session deleted on one machine and edited
+# on another.
+FIX_ACTIONS = ("mine", "theirs", "keep", "drop")
 
 _DUR_HM = re.compile(r"^(\d+)h(\d+)m?$")
 _DUR_H = re.compile(r"^(\d+(?:\.\d+)?)h$")
@@ -147,6 +147,8 @@ def parse_command(raw: str) -> Command | ParseError:
         return ParseError(f"usage: {usage}")
     if name == "fix" and (not args[0].isdigit() or args[1].lower() not in FIX_ACTIONS):
         return ParseError(f"usage: {usage}")
+    if name == "default" and not (args[0].lower() == "off" or (args[0].isdigit() and int(args[0]) > 0)):
+        return ParseError(f"usage: {usage}")
     if name == "metric" and not METRIC_KEY_RE.match(args[1].lstrip("-").lower()):
         return ParseError("a metric key is lowercase letters, digits, dashes or underscores")
     return Command(name=name, args=args, rest=rest)
@@ -165,12 +167,23 @@ def _parse_add(raw: str, skills: list[Skill], today: dt.date) -> Parsed:
     # Metrics come out first, wherever they sit, so "run 45m distance=8.2
     # yesterday" still finds its date in what remains.
     declared = next((s.metrics for s in skills if s.id == skill_id), ())
-    extra, rest = _take_metrics(tokens[2:], declared)
+    extra, rest, error = _take_metrics(tokens[2:], declared)
+    if error:
+        return ParseError(error)
     when = today
     if rest:
         # A date is only consumed from position 3, and only if it really is
         # one - otherwise "ml 1h 5 papers read" would lose its first word.
-        candidate, error = parse_date(rest[0], today)
+        # M/D is ambiguous with fitness notation ("3/4 squats", "12/8 deadlift"),
+        # so it's only trusted as a date when it's the sole leftover token -
+        # otherwise, or if it isn't a real calendar date, it stays in the note.
+        is_md = bool(_DATE_MD.match(rest[0].lower()))
+        if is_md and len(rest) > 1:
+            candidate, error = None, None
+        else:
+            candidate, error = parse_date(rest[0], today)
+            if error and is_md:
+                candidate, error = None, None
         if error:
             return ParseError(error)
         if candidate is not None:
@@ -182,29 +195,38 @@ def _parse_add(raw: str, skills: list[Skill], today: dt.date) -> Parsed:
 
 def _take_metrics(
     tokens: list[str], declared: tuple[str, ...]
-) -> tuple[tuple[tuple[str, Any], ...], list[str]]:
+) -> tuple[tuple[tuple[str, Any], ...], list[str], str | None]:
     """Pull `key=value` tokens the skill has declared out of the note.
 
     Only declared keys are consumed, so a note that happens to contain an
-    equals sign ("todo: check a=b") stays a note.
+    equals sign ("todo: check a=b") stays a note. A declared key with a
+    malformed value (e.g. "distance=") is an error, not a silent fallthrough.
     """
     found: dict[str, Any] = {}
     rest: list[str] = []
     for token in tokens:
-        metric = parse_metric(token, declared)
+        metric, error = parse_metric(token, declared)
+        if error:
+            return (), [], error
         if metric is None:
             rest.append(token)
         else:
             found[metric[0]] = metric[1]
-    return tuple(sorted(found.items())), rest
+    return tuple(sorted(found.items())), rest, None
 
 
-def parse_metric(token: str, declared: tuple[str, ...]) -> tuple[str, Any] | None:
-    """`key=value` for a key this skill declared, else None."""
+def parse_metric(token: str, declared: tuple[str, ...]) -> tuple[tuple[str, Any] | None, str | None]:
+    """`key=value` for a key this skill declared. Returns (metric, error);
+    (None, None) means the token isn't a declared metric at all - stays a note."""
     match = _METRIC_TOKEN.match(token)
-    if match is None or not match.group(2) or match.group(1).lower() not in set(declared):
-        return None
-    return match.group(1).lower(), _metric_value(match.group(2))
+    if match is None:
+        return None, None
+    key = match.group(1).lower()
+    if key not in set(declared):
+        return None, None
+    if not match.group(2):
+        return None, f"{key} needs a value, e.g. {key}=8.2"
+    return (key, _metric_value(match.group(2))), None
 
 
 def _metric_value(text: str) -> Any:
@@ -223,7 +245,10 @@ def parse_duration(token: str) -> tuple[int | None, str | None]:
     """Return (minutes, error)."""
     text = token.lower()
     if match := _DUR_HM.match(text):
-        minutes = int(match.group(1)) * 60 + int(match.group(2))
+        hours, mins = int(match.group(1)), int(match.group(2))
+        if mins >= 60:
+            return None, f'"{token}" - minutes must be under 60, try {hours + mins // 60}h{mins % 60:02d}'
+        minutes = hours * 60 + mins
     elif match := _DUR_H.match(text):
         minutes = round(float(match.group(1)) * 60)
     elif match := _DUR_M.match(text):

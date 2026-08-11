@@ -38,8 +38,8 @@ tenx
 ```
 
 Then just type: `<skill> <duration> [date] [note...]`, e.g. `ml 1h30 optimizer sweep`.
-A leading `:` is a command — `:new`, `:rm`, `:detail`, `:sync`, and a dozen
-others. Full grammar, every command, custom metrics, and multi-machine
+A leading `:` is a command — `:new`, `:rm`, `:sync`, and a dozen others (`d
+<id>` opens a skill's detail panel without the colon). Full grammar, every command, custom metrics, and multi-machine
 conflict handling are in the **[user guide](docs/USER_GUIDE.md)**.
 
 ## Documentation

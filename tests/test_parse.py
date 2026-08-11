@@ -48,13 +48,22 @@ def test_duration_forms(text, minutes):
     assert result.minutes == minutes
 
 
-@pytest.mark.parametrize("text", ["ml 0m", "ml 0", "ml -5m", "ml 25h", "ml 1h3o", "ml abc", "ml 1441"])
+@pytest.mark.parametrize(
+    "text", ["ml 0m", "ml 0", "ml -5m", "ml 25h", "ml 1h3o", "ml abc", "ml 1441", "ml 1h90", "ml 1h60"]
+)
 def test_duration_rejects(text):
     assert isinstance(add(text), ParseError)
 
 
 def test_fractional_hours_with_explicit_minutes_is_ambiguous():
     assert parse_duration("1.5h30")[0] is None
+
+
+def test_hm_minutes_must_be_under_60():
+    # "1h90" used to silently parse as 150 minutes (60 + 90) - it must be
+    # rejected instead, the same principle already applied to 1.5h30.
+    minutes, error = parse_duration("1h90")
+    assert minutes is None and error is not None
 
 
 def test_empty_input():
@@ -94,9 +103,23 @@ def test_date_forms(text, expected):
     assert result.date == expected
 
 
-@pytest.mark.parametrize("text", ["ml 1h 2027-01-01", "ml 1h 2/30", "ml 1h 13/1", "ml 1h 2026-13-01"])
+@pytest.mark.parametrize("text", ["ml 1h 2027-01-01", "ml 1h 2026-13-01"])
 def test_date_rejects(text):
+    # Only the unambiguous ISO form hard-errors on a bad date. It's an
+    # explicit format the user chose on purpose, so a mistake is worth
+    # surfacing rather than silently becoming a note.
     assert isinstance(add(text), ParseError)
+
+
+@pytest.mark.parametrize("text", ["ml 1h 2/30", "ml 1h 13/1"])
+def test_invalid_md_falls_back_to_note_instead_of_erroring(text):
+    # M/D is ambiguous with fitness notation, so an M/D-shaped token that
+    # isn't a real calendar date degrades to note text rather than killing
+    # the whole line - unlike the unambiguous ISO form above.
+    result = add(text)
+    assert isinstance(result, QuickAdd)
+    assert result.date == TODAY
+    assert result.note == text.split(maxsplit=2)[2]
 
 
 def test_iso_lookalikes_are_not_dates():
@@ -119,12 +142,24 @@ def test_note_starting_with_a_digit_is_not_eaten_as_a_date():
 
 
 def test_note_after_a_date():
-    result = add("poker 2h 8/5 deep stack notes")
+    # An unambiguous ISO date still backdates correctly even with a note
+    # trailing it.
+    result = add("poker 2h 2026-08-05 deep stack notes")
     assert isinstance(result, QuickAdd)
     assert result.skill == "poker"
     assert result.minutes == 120
     assert result.date == dt.date(2026, 8, 5)
     assert result.note == "deep stack notes"
+
+
+def test_md_date_with_trailing_note_stays_a_note():
+    # "12/8" here reads exactly like fitness set/rep notation, so it's only
+    # trusted as a date when nothing follows it - see test_date_forms for
+    # the sole-token case that does parse as a date.
+    result = add("run 1h 12/8 hill sprints")
+    assert isinstance(result, QuickAdd)
+    assert result.date == TODAY
+    assert result.note == "12/8 hill sprints"
 
 
 def test_colon_inside_a_note_is_not_a_command():
@@ -293,10 +328,13 @@ def test_metric_values_keep_their_type(text, expected):
     assert list(result.metrics.values()) == [expected]
 
 
-def test_an_empty_metric_value_is_not_a_metric():
+def test_a_declared_key_with_an_empty_value_is_an_error():
+    # distance is declared on `run`, so a malformed value is a mistake worth
+    # surfacing - not a silent fallthrough to note text (unlike an
+    # undeclared key, which stays a note; see test_an_undeclared_key_stays_in_the_note).
     result = metric_add("run 45m distance=")
-    assert isinstance(result, QuickAdd)
-    assert result.metrics == {} and result.note == "distance="
+    assert isinstance(result, ParseError)
+    assert "distance" in result.message
 
 
 def test_metric_command():

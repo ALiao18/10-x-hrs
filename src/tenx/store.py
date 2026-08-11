@@ -257,6 +257,11 @@ def replay(ops: Iterable[Op]) -> tuple[dict[str, Session], int, list[Collision]]
         if op.id in records and op.id not in dead:
             note_clash(op, records[op.id].merge(op))
             latest_ts[op.id] = max(latest_ts.get(op.id, ""), op.ts)
+        else:
+            # An edit whose add never showed up - the exact shape of a
+            # half-synced multi-machine state. Count it like any other
+            # unusable op rather than dropping it with no trace.
+            skipped += 1
 
     collisions = [clash for _, clash in sorted(clashes.items())]
 
