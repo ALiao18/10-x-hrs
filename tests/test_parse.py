@@ -91,9 +91,7 @@ def test_skill_without_duration():
         ("ml 1h friday", dt.date(2026, 8, 7)),
         ("ml 1h -1", dt.date(2026, 8, 8)),
         ("ml 1h -2", dt.date(2026, 8, 7)),
-        ("ml 1h 8/5", dt.date(2026, 8, 5)),
         ("ml 1h 2026-08-05", dt.date(2026, 8, 5)),
-        ("ml 1h 12/28", dt.date(2025, 12, 28)),  # rolls back rather than rejecting
         ("ml 1h 2024-02-29", dt.date(2024, 2, 29)),
     ],
 )
@@ -111,11 +109,11 @@ def test_date_rejects(text):
     assert isinstance(add(text), ParseError)
 
 
-@pytest.mark.parametrize("text", ["ml 1h 2/30", "ml 1h 13/1"])
-def test_invalid_md_falls_back_to_note_instead_of_erroring(text):
-    # M/D is ambiguous with fitness notation, so an M/D-shaped token that
-    # isn't a real calendar date degrades to note text rather than killing
-    # the whole line - unlike the unambiguous ISO form above.
+@pytest.mark.parametrize("text", ["ml 1h 2/30", "ml 1h 13/1", "ml 1h 8/5"])
+def test_slash_tokens_are_not_dates_at_all(text):
+    # There's no M/D form - it's the one date shape that collides with note
+    # content ("3/4 squats", "12/8 deadlift"), so any slash token, valid
+    # calendar date or not, is just note text like any other unrecognized word.
     result = add(text)
     assert isinstance(result, QuickAdd)
     assert result.date == TODAY
@@ -153,9 +151,10 @@ def test_note_after_a_date():
 
 
 def test_md_date_with_trailing_note_stays_a_note():
-    # "12/8" here reads exactly like fitness set/rep notation, so it's only
-    # trusted as a date when nothing follows it - see test_date_forms for
-    # the sole-token case that does parse as a date.
+    # "12/8" here reads exactly like fitness set/rep notation. There's no
+    # M/D date form at all now, so this is never mistaken for a date -
+    # regardless of whether a note follows it (see test_slash_tokens_are_not_dates_at_all
+    # for the sole-token case).
     result = add("run 1h 12/8 hill sprints")
     assert isinstance(result, QuickAdd)
     assert result.date == TODAY

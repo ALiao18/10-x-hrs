@@ -132,9 +132,16 @@ as 150 minutes) and `1.5h30` rejected as ambiguous: is that 90 minutes plus
 
 **Dates** accept `today`, `yesterday`, a weekday name (`mon`…`sun` or spelled
 out, meaning the most recent occurrence — today counts if today matches),
-`M/D` (rolls back a year if that would otherwise be in the future), an
-explicit `YYYY-MM-DD`, or `-N` for N days ago. Future dates are always
+an explicit `YYYY-MM-DD`, or `-N` for N days ago. Future dates are always
 rejected.
+
+There's deliberately no `M/D` form (no `12/8` for December 8th). It's the
+one date shape that collides with note content — `3/4`, `5/3/1`, `12/8` all
+read as fitness set/rep notation — so a real backfill note right after it
+(`read 1h 8/5 chapter 4`) would be genuinely ambiguous between "August 5th,
+note: chapter 4" and "today, note: 8/5 chapter 4". The four forms above cover
+every realistic backfill without that risk: `-6`, `yesterday`, a weekday
+name, or a plain `2026-08-05` all say exactly what they mean next to a note.
 
 **The date is only ever read from the third word**, and only if it parses as
 one of the forms above. Everything else becomes the note. This is why
@@ -142,14 +149,6 @@ one of the forms above. Everything else becomes the note. This is why
 interpret `5` as a date — and why a note can't start with something that
 looks like a duration/date typo and get silently misparsed; it's positional,
 not fuzzy.
-
-**`M/D` is only trusted as a date when it's the whole third word and nothing
-follows it** — `lift 1h 12/8` logs to December 8, but `lift 1h 12/8 deadlift`
-keeps "12/8 deadlift" as the note, since a real note is far more likely to
-start with sets/reps notation (`3/4`, `5/3/1`, `12/8`) than a lone `M/D` is
-to actually be a date sitting next to more note text. A malformed `M/D`-shaped
-word (`13/45`) never kills the line either — it just falls back to note text
-instead of erroring.
 
 **Typos don't lose your input.** If a line doesn't parse, the text stays in
 the box and an error appears below it — fix in place and press enter again:

@@ -74,7 +74,6 @@ _DUR_N = re.compile(r"^(\d+)$")
 
 _METRIC_TOKEN = re.compile(r"^([A-Za-z][A-Za-z0-9_-]*)=(.*)$")
 
-_DATE_MD = re.compile(r"^(\d{1,2})/(\d{1,2})$")
 _DATE_ISO = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _DATE_AGO = re.compile(r"^-(\d+)$")
 _WEEKDAYS = {
@@ -174,16 +173,10 @@ def _parse_add(raw: str, skills: list[Skill], today: dt.date) -> Parsed:
     if rest:
         # A date is only consumed from position 3, and only if it really is
         # one - otherwise "ml 1h 5 papers read" would lose its first word.
-        # M/D is ambiguous with fitness notation ("3/4 squats", "12/8 deadlift"),
-        # so it's only trusted as a date when it's the sole leftover token -
-        # otherwise, or if it isn't a real calendar date, it stays in the note.
-        is_md = bool(_DATE_MD.match(rest[0].lower()))
-        if is_md and len(rest) > 1:
-            candidate, error = None, None
-        else:
-            candidate, error = parse_date(rest[0], today)
-            if error and is_md:
-                candidate, error = None, None
+        # There's no M/D form: it's the one shape that collides with note
+        # content ("3/4 squats", "12/8 deadlift"), so every remaining format
+        # here is unambiguous and a genuine mistake is worth hard-erroring on.
+        candidate, error = parse_date(rest[0], today)
         if error:
             return ParseError(error)
         if candidate is not None:
@@ -276,16 +269,6 @@ def parse_date(token: str, today: dt.date) -> tuple[dt.date | None, str | None]:
         return today - dt.timedelta(days=(today.weekday() - _WEEKDAYS[text]) % 7), None
     if match := _DATE_AGO.match(text):
         return today - dt.timedelta(days=int(match.group(1))), None
-    if match := _DATE_MD.match(text):
-        month, day = int(match.group(1)), int(match.group(2))
-        for year in (today.year, today.year - 1):
-            try:
-                candidate = dt.date(year, month, day)
-            except ValueError:
-                continue
-            if candidate <= today:
-                return candidate, None
-        return None, f'"{token}" is not a real date'
     if _DATE_ISO.match(text):
         try:
             candidate = dt.date.fromisoformat(text)
